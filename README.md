@@ -50,7 +50,7 @@ is sent only to the vendor it belongs to.
 | Claude | macOS Keychain item `Claude Code-credentials`, else `~/.claude/.credentials.json` | `api.anthropic.com/api/oauth/usage` |
 | Codex / ChatGPT | `~/.codex/auth.json` (or `$CODEX_HOME`) | `chatgpt.com/backend-api/wham/usage` |
 | Gemini CLI | `~/.gemini/oauth_creds.json` | `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota` |
-| OpenCode Go | `$OPENCODE_API_KEY`, else `~/.local/share/opencode/auth.json` | `opencode.ai/zen/go/v1/usage` |
+| OpenCode Go | `$OPENCODE_API_KEY`, else `~/.local/share/opencode/auth.json` | `opencode.ai/inference/go/v1/usage` |
 
 Things to know:
 
@@ -66,8 +66,10 @@ Things to know:
   "sign-in expired — run `claude` once to renew it" (or `codex`, `gemini`).
 - Google stopped serving Gemini CLI sign-ins for individual, AI Pro and Ultra
   accounts in June 2026, so Gemini will show an error for those accounts.
-- OpenCode Go is the least certain of the four: the auth header and reply shape
-  are educated guesses.
+- OpenCode Go is the one provider with a vendor-documented usage endpoint, and
+  Copia follows that documentation, but it has not been run with a real Go
+  key. OpenCode v2 keeps credentials in a SQLite database Copia does not read,
+  so if `auth.json` is missing or stale, set `OPENCODE_API_KEY` to your Go key.
 - **Not built yet:** Antigravity, OpenCode Zen balance, Cursor, Copilot. Use a
   custom command (below) or send a patch to `src/providers.rs`; a provider is
   one function.
@@ -123,7 +125,7 @@ cargo tauri build
   colour; elsewhere bars are purple, amber below 50% and red below 20%.
 - Hover the icon for the numbers as text.
 - A provider marked **unverified** in the popover is one whose request or reply
-  shape is a guess (currently OpenCode Go).
+  code has not been run against a live account (currently OpenCode Go).
 - The popover follows the system light / dark theme, redraws its bars in
   system colours under Windows High Contrast, and exposes each bar to screen
   readers as a meter ("week: 39% left, resets in 3d").

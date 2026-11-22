@@ -108,7 +108,7 @@ fn check_private(_path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Providers whose endpoint details are educated guesses.
+/// Providers nobody has run against a live account yet.
 const EXPERIMENTAL: [&str; 1] = ["opencode-go"];
 
 /// Ok(None) = not set up on this machine; Err = set up but the fetch failed.
@@ -375,12 +375,21 @@ fn gemini() -> Fetched {
 
 // ----------------------------------------------------------- OpenCode Go ---
 
-/// Experimental: the usage endpoint and reply shape are taken from CodexBar's
-/// notes and have not been confirmed against a live subscription.
+/// Endpoint and reply shape are OpenCode's documented ones
+/// (https://opencode.ai/docs, "Go" page: `GET /inference/go/v1/usage`), but
+/// nobody has run this against a live Go subscription yet.
 fn opencode_go() -> Fetched {
+    // The key is the Go API key. OpenCode v1 kept it in auth.json; v2 keeps
+    // credentials in a SQLite database Copia does not read, so v2-only users
+    // need OPENCODE_API_KEY set.
     let key = std::env::var("OPENCODE_API_KEY").ok().filter(|k| !k.is_empty()).or_else(|| {
-        let auth = read_json(dirs::home_dir()?.join(".local/share/opencode/auth.json"))?;
-        Some(auth.pointer("/opencode-go/key")?.as_str()?.to_string())
+        let data = match std::env::var_os("XDG_DATA_HOME") {
+            Some(dir) => PathBuf::from(dir),
+            None => dirs::home_dir()?.join(".local/share"),
+        };
+        let auth = read_json(data.join("opencode/auth.json"))?;
+        let entry = &auth["opencode-go"];
+        Some(entry["key"].as_str().or_else(|| entry["access"].as_str())?.to_string())
     });
     let Some(key) = key else {
         return Ok(None);
@@ -388,32 +397,38 @@ fn opencode_go() -> Fetched {
 
     let reply = send(
         agent()
-            .get("https://opencode.ai/zen/go/v1/usage")
+            .get("https://opencode.ai/inference/go/v1/usage")
             .set("Authorization", &format!("Bearer {key}")),
         None,
-    )?;
+    )
+    .map_err(|e| {
+        if e.starts_with("HTTP 401") {
+            "OpenCode did not accept this API key".to_string()
+        } else if e.starts_with("HTTP 403") {
+            "this key has no OpenCode Go subscription".to_string()
+        } else {
+            e
+        }
+    })?;
+    Ok(Some(opencode_go_quotas(&reply)))
+}
 
-    let windows = [
-        ("rolling", "rollingUsage", "5h"),
-        ("weekly", "weeklyUsage", "week"),
-        ("monthly", "monthlyUsage", "month"),
-    ];
+/// `{"usage": {"rolling": {"status", "percent", "resetsAt"}, "weekly", "monthly"}}`
+/// where `percent` is 0–100 *used* and `resetsAt` is ISO-8601.
+fn opencode_go_quotas(reply: &Value) -> Vec<Quota> {
+    let windows = [("rolling", "5h"), ("weekly", "week"), ("monthly", "month")];
     let mut quotas = Vec::new();
-    for (nested, flat, label) in windows {
-        let window = match &reply["usage"][nested] {
-            Value::Null => &reply[flat],
-            found => found,
-        };
-        let percent = window["percent"].as_f64().or_else(|| window["usagePercent"].as_f64());
-        if let Some(percent) = percent {
+    for (key, label) in windows {
+        let meter = &reply["usage"][key];
+        if let Some(percent) = meter["percent"].as_f64() {
             quotas.push(Quota {
                 label: label.into(),
                 used: fraction(percent / 100.0),
-                resets_at: window["resetInSec"].as_u64().map(|s| json!(now_secs() + s)),
+                resets_at: some(&meter["resetsAt"]),
             });
         }
     }
-    Ok(Some(quotas))
+    quotas
 }
 
 // ---------------------------------------------------------------- Custom ---
@@ -653,5 +668,32 @@ mod tests {
 
         mode(&dir, 0o700);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod opencode_go_tests {
+    use super::*;
+
+    /// The example reply from OpenCode's own documentation.
+    #[test]
+    fn opencode_go_documented_reply() {
+        let reply = json!({ "usage": {
+            "rolling": { "status": "ok", "percent": 30, "resetsAt": "2026-11-21T15:00:00.000Z" },
+            "weekly": { "status": "rate-limited", "percent": 100, "resetsAt": "2026-11-23T00:00:00.000Z" },
+            "monthly": { "status": "ok", "percent": 50, "resetsAt": "2026-12-01T00:00:00.000Z" }
+        }});
+        let quotas = opencode_go_quotas(&reply);
+        let seen: Vec<(&str, f64)> = quotas.iter().map(|q| (q.label.as_str(), q.used)).collect();
+        assert_eq!(seen, [("5h", 0.3), ("week", 1.0), ("month", 0.5)]);
+        assert_eq!(quotas[0].resets_at, Some(json!("2026-11-21T15:00:00.000Z")));
+    }
+
+    #[test]
+    fn opencode_go_missing_window_is_skipped() {
+        let reply = json!({ "usage": { "rolling": { "status": "ok", "percent": 5 } } });
+        let quotas = opencode_go_quotas(&reply);
+        assert_eq!(quotas.len(), 1);
+        assert_eq!(quotas[0].resets_at, None);
     }
 }

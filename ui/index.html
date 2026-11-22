@@ -5,73 +5,118 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Copia</title>
 <style>
+  /* --good / --warn / --low in the dark theme are the tray icon's colours too
+     (src/icon.rs). Fills keep 3:1 against --track, text 4.5:1 against --bg. */
   :root {
     color-scheme: light dark;
-    --bg: #f6f5f1; --ink: #1d2430; --muted: #6b7482; --line: #dcd9d0; --track: #e4e1d8;
-    --good: #2f9e6b; --warn: #c98a12; --low: #d2493f;
+    --bg: #f6f5f1; --ink: #1d2430; --muted: #5a6371; --line: #dcd9d0;
+    --track: #e4e1d8; --edge: #8c8778;
+    --good: #1f7d53; --warn: #96640a; --low: #c03a30;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #181f2a; --ink: #e9edf3; --muted: #8e99a8; --line: #2b3545; --track: #2b3545;
+      --bg: #181f2a; --ink: #e9edf3; --muted: #8e99a8; --line: #2b3545;
+      --track: #2b3545; --edge: #66758c;
       --good: #56c48c; --warn: #f0be50; --low: #ec6e64;
     }
   }
   * { box-sizing: border-box; }
+  ::selection { background: color-mix(in srgb, var(--good) 35%, transparent); }
+  html { font-size: 100%; }
   html, body { margin: 0; background: var(--bg); color: var(--ink); overflow: hidden; }
   body {
-    font: 12px/1.3 system-ui, -apple-system, "Segoe UI", sans-serif;
-    width: max-content; min-width: 200px; max-width: 880px;
-    padding: 12px 14px 10px; user-select: none; cursor: default;
+    font: .8125rem/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column;
+    width: max-content; min-width: 13rem; max-width: 55rem; max-height: 600px;
+    padding: .75rem .875rem .625rem; user-select: none; cursor: default;
   }
-  header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
-  h1 { font-size: 13px; margin: 0; letter-spacing: .04em; }
-  #when { color: var(--muted); font-size: 11px; flex: 1; white-space: nowrap; }
+  header { display: flex; align-items: center; gap: .5rem; margin-bottom: .75rem; }
+  h1 { font-size: inherit; margin: 0; letter-spacing: .04em; text-transform: uppercase; }
+  #when { color: var(--muted); font-size: .6875rem; flex: 1; white-space: nowrap; }
   button {
-    font: inherit; color: var(--muted); background: none; border: 1px solid var(--line);
-    border-radius: 6px; padding: 2px 8px; cursor: pointer;
+    font: inherit; font-size: .75rem; color: var(--muted); background: none;
+    border: 1px solid var(--edge); border-radius: 6px;
+    min-height: 1.5rem; padding: 0 .625rem; cursor: pointer;
   }
-  button:hover { color: var(--ink); }
-  button:disabled { opacity: .5; cursor: default; }
+  button:hover { color: var(--ink); border-color: var(--ink); }
+  button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  button:disabled { opacity: .6; cursor: default; }
 
-  #groups { display: flex; gap: 18px; align-items: flex-end; }
-  .group { display: flex; flex-direction: column; align-items: center; gap: 7px; }
-  .group + .group { border-left: 1px solid var(--line); padding-left: 18px; }
-  .bars { display: flex; gap: 10px; }
-  .name { font-weight: 600; white-space: nowrap; }
+  /* Every group carries a left rule; the negative margin pushes each row's
+     first rule out of main, where it is clipped. Rows can then wrap freely. */
+  main { min-height: 0; overflow: hidden auto; scrollbar-width: thin; scrollbar-color: var(--edge) transparent; }
+  #groups {
+    display: flex; flex-wrap: wrap; align-items: flex-end; row-gap: 1rem;
+    margin: 0 -1.125rem 0 calc(-1.125rem - 1px);
+  }
+  .group {
+    display: flex; flex-direction: column; align-items: center; gap: .45rem;
+    padding: 0 1.125rem; border-left: 1px solid var(--line);
+  }
+  .bars { display: flex; gap: .5rem; }
+  .name { order: 2; margin: 0; font-size: inherit; font-weight: 600; white-space: nowrap; }
+  .flag { font-weight: 400; font-size: .6875rem; color: var(--muted); }
 
-  .quota { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 38px; }
+  .quota {
+    display: flex; flex-direction: column; align-items: center; gap: .2rem;
+    min-width: 2.75rem; max-width: 5rem;
+  }
   .pct { font-variant-numeric: tabular-nums; font-weight: 600; }
   .track {
-    width: 20px; height: 110px; border-radius: 6px; background: var(--track);
-    display: flex; align-items: flex-end; overflow: hidden;
+    width: 1.25rem; height: 6.875rem; border-radius: 6px; overflow: hidden;
+    background: var(--track); box-shadow: inset 0 0 0 1px var(--edge);
   }
-  .fill { width: 100%; background: var(--good); min-height: 2px; transition: height .3s; }
+  .fill {
+    height: 100%; background: var(--good);
+    transform: scaleY(var(--level, 0)); transform-origin: bottom;
+    transition: transform .45s cubic-bezier(.16, 1, .3, 1);
+  }
   .warn .fill { background: var(--warn); }
   .low .fill { background: var(--low); }
   .low .pct { color: var(--low); }
-  .label { white-space: nowrap; }
-  .reset { color: var(--muted); font-size: 10px; white-space: nowrap; min-height: 13px; }
+  .label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reset { color: var(--muted); font-size: .6875rem; white-space: nowrap; min-height: 1.35em; }
 
-  .trouble { width: 96px; height: 110px; color: var(--muted); font-size: 11px;
-    display: flex; align-items: center; text-align: center; overflow-wrap: anywhere; }
-  #empty { color: var(--muted); max-width: 250px; white-space: normal; }
-  footer { margin-top: 10px; padding-top: 7px; border-top: 1px solid var(--line);
-    color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+  .trouble { width: 7.5rem; height: 6.875rem; display: flex; align-items: center; }
+  .trouble p {
+    margin: 0; width: 100%; color: var(--muted); font-size: .6875rem; text-align: center;
+    overflow-wrap: anywhere; user-select: text; cursor: text;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 7; overflow: hidden;
+  }
+  #empty { margin: 0; color: var(--muted); max-width: 16rem; }
+  footer {
+    margin-top: .625rem; padding-top: .45rem; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: .6875rem;
+  }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  @media (prefers-reduced-motion: reduce) { .fill { transition: none; } }
+  /* Windows High Contrast drops author backgrounds; redraw the bars in system colours. */
+  @media (forced-colors: active) {
+    .track { background: Canvas; box-shadow: none; border: 1px solid CanvasText; }
+    .fill, .warn .fill, .low .fill { background: Highlight; forced-color-adjust: none; }
+    .low .pct { color: CanvasText; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>COPIA</h1>
+  <h1>Copia</h1>
   <span id="when"></span>
-  <button id="refresh" title="Fetch the quotas again">Refresh</button>
+  <button id="refresh" title="Fetch the quotas again (Ctrl+R or ⌘R)">Refresh</button>
 </header>
-<main id="groups"></main>
+<main>
+  <div id="groups"></div>
+  <p id="empty" hidden></p>
+</main>
+<p id="announce" class="sr" aria-live="polite"></p>
 <footer id="foot"></footer>
 
 <script>if (!window.__TAURI__) document.write('<script src="preview.js"><\/script>');</script>
 <script>
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const $ = id => document.getElementById(id);
 const el = (tag, cls, text) => {
   const node = document.createElement(tag);
   if (cls) node.className = cls;
@@ -80,6 +125,9 @@ const el = (tag, cls, text) => {
 };
 
 let last = null;
+let lastFit = "";
+let announcedAt = null;
+const levels = new Map(); // "provider/label" -> fraction left shown last time
 
 // "resets_at" is epoch seconds or an ISO string; say how long from now.
 function until(resetsAt) {
@@ -93,64 +141,110 @@ function until(resetsAt) {
   return `in ${Math.round(mins / 1440)}d`;
 }
 
-function quotaBar(q) {
+function quotaBar(provider, q, snap, settle) {
   const left = Math.max(0, Math.min(1, 1 - q.used));
   const pct = Math.round(left * 100);
-  const box = el("div", "quota" + (left < 0.2 ? " low" : left < 0.5 ? " warn" : ""));
-  box.title = `${pct}% left, ${100 - pct}% used`;
-  box.append(el("div", "pct", pct + "%"));
-  const track = el("div", "track");
+  const reset = until(q.resets_at);
+  const state = left < snap.low_below ? " low" : left < snap.warn_below ? " warn" : "";
+  const said = `${q.label}: ${pct}% left` + (reset ? `, resets ${reset}` : "");
+
+  const box = el("div", "quota" + state);
+  box.setAttribute("role", "meter");
+  box.setAttribute("aria-valuemin", 0);
+  box.setAttribute("aria-valuemax", 100);
+  box.setAttribute("aria-valuenow", pct);
+  box.setAttribute("aria-label", said);
+  box.title = `${provider.name} ${said}`;
+
+  // A known quota always shows at least a sliver.
+  const level = Math.max(left, 0.02);
+  const key = provider.id + "/" + q.label;
   const fill = el("div", "fill");
-  fill.style.height = pct + "%";
+  fill.style.setProperty("--level", levels.get(key) ?? level);
+  settle.push(() => fill.style.setProperty("--level", level));
+  levels.set(key, level);
+
+  const track = el("div", "track");
   track.append(fill);
-  box.append(track, el("div", "label", q.label), el("div", "reset", until(q.resets_at)));
+  box.append(el("div", "pct", pct + "%"), track, el("div", "label", q.label), el("div", "reset", reset));
   return box;
 }
 
 function render(snap) {
   last = snap;
-  const groups = document.getElementById("groups");
-  groups.replaceChildren();
+  const groups = $("groups");
   const active = snap.providers.filter(p => p.configured);
   const missing = snap.providers.filter(p => !p.configured).map(p => p.name);
+  const settle = [];
 
-  for (const p of active) {
+  groups.replaceChildren(...active.map((p, i) => {
     const group = el("section", "group");
+    const name = el("h2", "name", p.name);
+    name.id = "provider-" + i;
+    if (p.experimental) {
+      const flag = el("span", "flag", " unverified");
+      flag.title = "Copia's reading of this provider has not been confirmed against a live account.";
+      name.append(flag);
+    }
+    group.setAttribute("aria-labelledby", name.id);
+    group.append(name);
     if (p.error) {
-      group.append(el("div", "trouble", p.error));
+      const trouble = el("div", "trouble");
+      trouble.append(el("p", null, p.error));
+      trouble.title = p.error;
+      group.append(trouble);
     } else {
       const bars = el("div", "bars");
-      bars.append(...p.quotas.map(quotaBar));
+      bars.append(...p.quotas.map(q => quotaBar(p, q, snap, settle)));
       group.append(bars);
     }
-    group.append(el("div", "name", p.name));
-    groups.append(group);
-  }
-  if (!active.length) {
-    groups.append(el("div", null, snap.loading ? "Fetching quotas…" :
-      "No signed-in coding tools found on this computer. Sign in with claude, codex, gemini or opencode, then refresh."));
-    groups.firstChild.id = "empty";
-  }
+    return group;
+  }));
+  // Bars were built at their previous level; let them ease to the new one.
+  groups.offsetHeight;
+  settle.forEach(run => run());
 
-  const when = document.getElementById("when");
-  if (snap.loading) when.textContent = "refreshing…";
-  else if (snap.updated_at) when.textContent = "as of " +
-    new Date(snap.updated_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  document.getElementById("refresh").disabled = snap.loading;
+  const empty = $("empty");
+  empty.hidden = active.length > 0;
+  empty.textContent = snap.loading ? "Fetching quotas…" :
+    "No signed-in coding tools found on this computer. Sign in with claude, codex, gemini or opencode, then refresh.";
+
+  const when = snap.loading ? "refreshing…" : snap.updated_at ? "as of " +
+    new Date(snap.updated_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+  if ($("when").textContent !== when) $("when").textContent = when;
+  $("refresh").disabled = snap.loading;
 
   const notes = ["Bars show what is left."];
   if (snap.demo) notes.unshift("Demo data.");
   if (missing.length && active.length) notes.push("Not signed in: " + missing.join(", ") + ".");
-  document.getElementById("foot").textContent = notes.join("  ");
+  $("foot").textContent = notes.join(" ");
+
+  // Tell assistive tech once per finished refresh, not on every repaint.
+  if (!snap.loading && snap.updated_at !== announcedAt) {
+    announcedAt = snap.updated_at;
+    const problems = active.filter(p => p.error).map(p => `${p.name}: ${p.error}.`);
+    $("announce").textContent = ["Quotas updated.", ...problems].join(" ");
+  }
 
   // Measured synchronously: a hidden popover gets no animation frames.
   const box = document.body.getBoundingClientRect();
-  invoke("fit", { width: Math.ceil(box.width), height: Math.ceil(box.height) });
+  const size = Math.ceil(box.width) + "x" + Math.ceil(box.height);
+  if (size !== lastFit) {
+    lastFit = size;
+    invoke("fit", { width: Math.ceil(box.width), height: Math.ceil(box.height) });
+  }
 }
 
 const load = () => invoke("get_snapshot").then(render);
-document.getElementById("refresh").addEventListener("click", () => invoke("refresh"));
-document.addEventListener("keydown", e => { if (e.key === "r") invoke("refresh"); });
+$("refresh").addEventListener("click", () => invoke("refresh"));
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") invoke("hide");
+  // Also keeps the webview from reloading the page on Ctrl/Cmd+R.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r") {
+    e.preventDefault();
+    invoke("refresh");
+  }
+});
 listen("snapshot", load);
 // Keep the "in 2h 5m" countdowns honest while the popover stays open.
 setInterval(() => { if (last && !document.hidden) render(last); }, 60000);

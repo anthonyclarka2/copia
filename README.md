@@ -110,7 +110,7 @@ cargo tauri build
 ## Using it
 
 - **Left click** the tray icon: show or hide the bars. Clicking anywhere else
-  hides them. Press `r` to refresh.
+  hides them, as does Esc. Ctrl+R / ⌘R refreshes.
 - **Right click**: Show quotas / Refresh now / Quit. On Linux, where trays only
   give apps a menu, this menu is the way in.
 - **The icon**: one bar per signed-in tool, filled to what is left of that
@@ -118,6 +118,11 @@ cargo tauri build
   limits is close". On macOS it is a template image that follows the menubar
   colour; elsewhere bars are green, amber below 50% and red below 20%.
 - Hover the icon for the numbers as text.
+- A provider marked **unverified** in the popover is one whose request or reply
+  shape is a guess (currently OpenCode Go).
+- The popover follows the system light / dark theme, redraws its bars in
+  system colours under Windows High Contrast, and exposes each bar to screen
+  readers as a meter ("week: 39% left, resets in 3d").
 
 ## Settings
 

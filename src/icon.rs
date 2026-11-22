@@ -1,6 +1,18 @@
 //! The tray icon is the chart: one small vertical bar per provider, filled to
 //! how much of that provider's tightest quota is left.
 
+/// Below this fraction left a quota is "getting low" (amber), and below
+/// `LOW_BELOW` it is "nearly out" (red). The popover receives these same
+/// numbers with every snapshot, so the icon and the bars always agree.
+pub const WARN_BELOW: f64 = 0.5;
+pub const LOW_BELOW: f64 = 0.2;
+
+// Same hues as the popover's dark theme (--good, --warn, --low in
+// ui/index.html). A tray's background is unknown, so the lighter set is used.
+const GOOD: [u8; 4] = [0x56, 0xc4, 0x8c, 255];
+const WARN: [u8; 4] = [0xf0, 0xbe, 0x50, 255];
+const LOW: [u8; 4] = [0xec, 0x6e, 0x64, 255];
+
 pub const HEIGHT: u32 = 44; // 22pt at 2x, the macOS menubar size
 const BAR: u32 = 8;
 const GAP: u32 = 4;
@@ -30,9 +42,9 @@ pub fn render(levels: &[Option<f64>], template: bool) -> (Vec<u8>, u32, u32) {
         };
         let fill = match (template, level) {
             (true, _) => [0, 0, 0, 255],
-            (false, Some(l)) if *l < 0.2 => [236, 104, 94, 255],
-            (false, Some(l)) if *l < 0.5 => [238, 184, 72, 255],
-            (false, _) => [84, 194, 138, 255],
+            (false, Some(l)) if *l < LOW_BELOW => LOW,
+            (false, Some(l)) if *l < WARN_BELOW => WARN,
+            (false, _) => GOOD,
         };
         let track = if template { [0, 0, 0, 70] } else { [140, 140, 140, 110] };
 

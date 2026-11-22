@@ -33,6 +33,9 @@ pub struct Provider {
     pub configured: bool,
     pub quotas: Vec<Quota>,
     pub error: Option<String>,
+    /// True when this provider's request or reply shape is a guess that has
+    /// not been confirmed against a live account; the popover says so.
+    pub experimental: bool,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -63,6 +66,9 @@ impl Config {
             .unwrap_or_default()
     }
 }
+
+/// Providers whose endpoint details are educated guesses.
+const EXPERIMENTAL: [&str; 1] = ["opencode-go"];
 
 /// Ok(None) = not set up on this machine; Err = set up but the fetch failed.
 type Fetched = Result<Option<Vec<Quota>>, String>;
@@ -98,7 +104,8 @@ pub fn fetch_all(config: &Config) -> Vec<Provider> {
                     Ok(None) => (false, Vec::new(), None),
                     Err(error) => (true, Vec::new(), Some(error)),
                 };
-                Provider { id, name, configured, quotas, error }
+                let experimental = EXPERIMENTAL.contains(&id.as_str());
+                Provider { id, name, configured, quotas, error, experimental }
             })
             .collect()
     })
@@ -118,6 +125,7 @@ pub fn demo() -> Vec<Provider> {
         configured: true,
         quotas,
         error: None,
+        experimental: EXPERIMENTAL.contains(&id),
     };
     vec![
         provider(

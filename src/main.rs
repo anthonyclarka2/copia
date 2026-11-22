@@ -15,13 +15,29 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewWindow,
 
 const TRAY_ID: &str = "copia";
 
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone)]
 struct Snapshot {
     providers: Vec<Provider>,
     /// Epoch seconds of the last finished refresh.
     updated_at: Option<u64>,
     loading: bool,
     demo: bool,
+    /// Fractions left below which a bar turns amber / red (see icon.rs).
+    warn_below: f64,
+    low_below: f64,
+}
+
+impl Snapshot {
+    fn new(providers: Vec<Provider>, updated_at: Option<u64>, loading: bool, demo: bool) -> Self {
+        Snapshot {
+            providers,
+            updated_at,
+            loading,
+            demo,
+            warn_below: icon::WARN_BELOW,
+            low_below: icon::LOW_BELOW,
+        }
+    }
 }
 
 /// Where the tray icon is, in physical pixels, so the popover can sit by it.
@@ -47,6 +63,12 @@ fn get_snapshot(shared: State<Shared>) -> Snapshot {
 #[tauri::command]
 fn refresh(shared: State<Shared>) {
     let _ = shared.refresh.lock().unwrap().send(());
+}
+
+/// Escape in the popover.
+#[tauri::command]
+fn hide(window: WebviewWindow) {
+    let _ = window.hide();
 }
 
 /// The page tells us how big its content is; size the popover to match.
@@ -149,12 +171,8 @@ fn spawn_worker(app: AppHandle, wake: mpsc::Receiver<()>, demo: bool) {
         let config = Config::load();
         let providers = if demo { providers::demo() } else { providers::fetch_all(&config) };
         update_tray(&app, &providers);
-        *shared.snapshot.lock().unwrap() = Snapshot {
-            providers,
-            updated_at: Some(providers::now_secs()),
-            loading: false,
-            demo,
-        };
+        *shared.snapshot.lock().unwrap() =
+            Snapshot::new(providers, Some(providers::now_secs()), false, demo);
         let _ = app.emit("snapshot", ());
 
         let minutes = config.refresh_minutes.unwrap_or(5).clamp(1, 240);
@@ -177,12 +195,12 @@ fn main() {
 
     tauri::Builder::default()
         .manage(Shared {
-            snapshot: Mutex::new(Snapshot { loading: true, demo, ..Default::default() }),
+            snapshot: Mutex::new(Snapshot::new(Vec::new(), None, true, demo)),
             refresh: Mutex::new(refresh_tx),
             anchor: Mutex::new(None),
             hidden_at: Mutex::new(Instant::now() - Duration::from_secs(1)),
         })
-        .invoke_handler(tauri::generate_handler![get_snapshot, refresh, fit])
+        .invoke_handler(tauri::generate_handler![get_snapshot, refresh, fit, hide])
         .on_window_event(move |window, event| match event {
             WindowEvent::Focused(false) if !pinned => {
                 *window.state::<Shared>().hidden_at.lock().unwrap() = Instant::now();

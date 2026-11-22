@@ -165,6 +165,12 @@ fn spawn_worker(app: AppHandle, wake: mpsc::Receiver<()>, demo: bool) {
 
 fn main() {
     let demo = std::env::args().any(|a| a == "--demo") || std::env::var_os("COPIA_DEMO").is_some();
+    // `copia --print`: fetch once, print the quotas as JSON, and exit. No tray.
+    if std::env::args().any(|a| a == "--print") {
+        let providers = if demo { providers::demo() } else { providers::fetch_all(&Config::load()) };
+        println!("{}", serde_json::to_string_pretty(&providers).unwrap_or_default());
+        return;
+    }
     // Development aid: keep the popover open when it loses focus.
     let pinned = std::env::var_os("COPIA_PIN").is_some();
     let (refresh_tx, refresh_rx) = mpsc::channel();

@@ -88,6 +88,13 @@ To look at it with made-up numbers and without touching any credential:
 cargo run --release -- --demo
 ```
 
+To check what Copia can read without opening the tray, print the quotas once
+as JSON (no tokens are printed):
+
+```bash
+cargo run --release -- --print
+```
+
 To make an installable app (`.app`/`.dmg`, `.msi`, `.deb`/`.AppImage`):
 
 ```bash

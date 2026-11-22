@@ -7,11 +7,12 @@
 pub const WARN_BELOW: f64 = 0.5;
 pub const LOW_BELOW: f64 = 0.2;
 
-// Same hues as the popover's dark theme (--good, --warn, --low in
-// ui/index.html). A tray's background is unknown, so the lighter set is used.
-const GOOD: [u8; 4] = [0x56, 0xc4, 0x8c, 255];
-const WARN: [u8; 4] = [0xf0, 0xbe, 0x50, 255];
-const LOW: [u8; 4] = [0xec, 0x6e, 0x64, 255];
+// Same hues as the popover's dark theme (--brand, --warn, --low in
+// ui/style.css). A tray's background is unknown, so the lighter set is used.
+// Purple is "plenty left"; amber and red only appear as a quota runs down.
+const FULL: [u8; 4] = [0xd2, 0x8c, 0xe1, 255];
+const WARN: [u8; 4] = [0xee, 0xbb, 0x58, 255];
+const LOW: [u8; 4] = [0xf6, 0x6e, 0x60, 255];
 
 pub const HEIGHT: u32 = 44; // 22pt at 2x, the macOS menubar size
 const BAR: u32 = 8;
@@ -44,7 +45,7 @@ pub fn render(levels: &[Option<f64>], template: bool) -> (Vec<u8>, u32, u32) {
             (true, _) => [0, 0, 0, 255],
             (false, Some(l)) if *l < LOW_BELOW => LOW,
             (false, Some(l)) if *l < WARN_BELOW => WARN,
-            (false, _) => GOOD,
+            (false, _) => FULL,
         };
         let track = if template { [0, 0, 0, 70] } else { [140, 140, 140, 110] };
 

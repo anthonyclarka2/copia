@@ -25,6 +25,20 @@ function until(resetsAt) {
   return `in ${Math.round(mins / 1440)}d`;
 }
 
+// A drawn warning sign, so a failed provider is marked by shape as well as colour.
+function alertIcon() {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 18 18");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", "M9 2.5 16.5 15.5h-15L9 2.5ZM9 7.5v3.75M9 13.4v.1");
+  for (const [k, v] of [["fill", "none"], ["stroke", "currentColor"], ["stroke-width", "1.6"],
+    ["stroke-linecap", "round"], ["stroke-linejoin", "round"]]) path.setAttribute(k, v);
+  svg.append(path);
+  return svg;
+}
+
 function quotaBar(provider, q, snap, settle) {
   const left = Math.max(0, Math.min(1, 1 - q.used));
   const pct = Math.round(left * 100);
@@ -74,7 +88,7 @@ function render(snap) {
     group.append(name);
     if (p.error) {
       const trouble = el("div", "trouble");
-      trouble.append(el("p", null, p.error));
+      trouble.append(alertIcon(), el("p", null, p.error));
       trouble.title = p.error;
       group.append(trouble);
     } else {

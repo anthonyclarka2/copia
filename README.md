@@ -120,7 +120,7 @@ cargo tauri build
 - **The icon**: one bar per signed-in tool, filled to what is left of that
   tool's *tightest* quota, so a nearly empty bar means "one of this tool's
   limits is close". On macOS it is a template image that follows the menubar
-  colour; elsewhere bars are green, amber below 50% and red below 20%.
+  colour; elsewhere bars are purple, amber below 50% and red below 20%.
 - Hover the icon for the numbers as text.
 - A provider marked **unverified** in the popover is one whose request or reply
   shape is a guess (currently OpenCode Go).

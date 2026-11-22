@@ -13,9 +13,10 @@ import subprocess
 import sys
 import zlib
 
-BG = (24, 32, 44)
-TRACK = (52, 66, 86)
-BARS = [((86, 196, 140), 0.82), ((240, 190, 80), 0.46), ((236, 110, 100), 0.20)]
+# The popover's dark theme: aubergine ground, purple / amber / red bars.
+BG = (25, 16, 28)
+TRACK = (51, 38, 53)
+BARS = [((210, 140, 225), 0.82), ((238, 187, 88), 0.46), ((246, 110, 96), 0.20)]
 
 
 def rounded(x, y, x0, y0, x1, y1, r):

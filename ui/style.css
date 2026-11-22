@@ -1,20 +1,24 @@
-/* --good / --warn / --low in the dark theme are the tray icon's colours too
-   (src/icon.rs). Fills keep 3:1 against --track, text 4.5:1 against --bg. */
+/* Parchment and Tyrian purple: the purple is Copia's one identity colour and
+   the colour of a quota with plenty left; amber and red appear only when a
+   quota is running down. Authored in OKLCH (hues 320 purple, 85 parchment,
+   72-82 amber, 28 red) and written as hex. --brand / --warn / --low in the
+   dark theme are the tray icon's colours too (src/icon.rs).
+   Fills keep 3:1 against --track, text 4.5:1 against --bg. */
 :root {
   color-scheme: light dark;
-  --bg: #f6f5f1; --ink: #1d2430; --muted: #5a6371; --line: #dcd9d0;
-  --track: #e4e1d8; --edge: #8c8778;
-  --good: #1f7d53; --warn: #96640a; --low: #c03a30;
+  --bg: #f7f3eb; --ink: #29182c; --muted: #625166; --line: #ded9ce;
+  --track: #e8e2d7; --edge: #877f70;
+  --brand: #712482; --warn: #a26a07; --low: #c22823;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #181f2a; --ink: #e9edf3; --muted: #8e99a8; --line: #2b3545;
-    --track: #2b3545; --edge: #66758c;
-    --good: #56c48c; --warn: #f0be50; --low: #ec6e64;
+    --bg: #19101c; --ink: #f0ebdf; --muted: #af9eb3; --line: #332635;
+    --track: #2d2230; --edge: #7c6a80;
+    --brand: #d28ce1; --warn: #eebb58; --low: #f66e60;
   }
 }
 * { box-sizing: border-box; }
-::selection { background: color-mix(in srgb, var(--good) 35%, transparent); }
+::selection { background: color-mix(in srgb, var(--brand) 30%, transparent); }
 html { font-size: 100%; }
 html, body { margin: 0; background: var(--bg); color: var(--ink); overflow: hidden; }
 body {
@@ -24,15 +28,16 @@ body {
   padding: .75rem .875rem .625rem; user-select: none; cursor: default;
 }
 header { display: flex; align-items: center; gap: .5rem; margin-bottom: .75rem; }
-h1 { font-size: inherit; margin: 0; letter-spacing: .04em; text-transform: uppercase; }
+h1 { font-size: inherit; margin: 0; color: var(--brand); letter-spacing: .04em; text-transform: uppercase; }
 #when { color: var(--muted); font-size: .6875rem; flex: 1; white-space: nowrap; }
 button {
   font: inherit; font-size: .75rem; color: var(--muted); background: none;
   border: 1px solid var(--edge); border-radius: 6px;
   min-height: 1.5rem; padding: 0 .625rem; cursor: pointer;
 }
-button:hover { color: var(--ink); border-color: var(--ink); }
-button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+button:hover { color: var(--brand); border-color: var(--brand); }
+button:active { background: color-mix(in srgb, var(--brand) 12%, transparent); }
+button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 button:disabled { opacity: .6; cursor: default; }
 
 /* Every group carries a left rule; the negative margin pushes each row's
@@ -60,7 +65,7 @@ main { min-height: 0; overflow: hidden auto; scrollbar-width: thin; scrollbar-co
   background: var(--track); box-shadow: inset 0 0 0 1px var(--edge);
 }
 .fill {
-  height: 100%; background: var(--good);
+  height: 100%; background: var(--brand);
   transform: scaleY(var(--level, 0)); transform-origin: bottom;
   transition: transform .45s cubic-bezier(.16, 1, .3, 1);
 }
@@ -70,11 +75,15 @@ main { min-height: 0; overflow: hidden auto; scrollbar-width: thin; scrollbar-co
 .label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reset { color: var(--muted); font-size: .6875rem; white-space: nowrap; min-height: 1.35em; }
 
-.trouble { width: 7.5rem; height: 6.875rem; display: flex; align-items: center; }
+.trouble {
+  width: 7.5rem; height: 6.875rem;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .4rem;
+}
+.trouble svg { flex: none; width: 1.125rem; height: 1.125rem; color: var(--low); }
 .trouble p {
   margin: 0; width: 100%; color: var(--muted); font-size: .6875rem; text-align: center;
   overflow-wrap: anywhere; user-select: text; cursor: text;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 7; overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; overflow: hidden;
 }
 #empty { margin: 0; color: var(--muted); max-width: 16rem; }
 footer {
@@ -88,5 +97,6 @@ footer {
 @media (forced-colors: active) {
   .track { background: Canvas; box-shadow: none; border: 1px solid CanvasText; }
   .fill, .warn .fill, .low .fill { background: Highlight; forced-color-adjust: none; }
-  .low .pct { color: CanvasText; }
+  .low .pct, h1 { color: CanvasText; }
+  .trouble svg { color: CanvasText; }
 }

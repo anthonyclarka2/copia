@@ -1,5 +1,8 @@
 # Copia
 
+[![build](https://github.com/potpiemuncher/copia/actions/workflows/build.yml/badge.svg)](https://github.com/potpiemuncher/copia/actions/workflows/build.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 *cōpia* — Latin for plenty, supply, what you have on hand.
 
 A small menubar / system-tray app that shows how much of your AI coding
@@ -35,8 +38,7 @@ Early, and honest about it:
 - **macOS fullscreen:** the popover did not come on screen while another app
   was in a fullscreen Space. It likely needs to become an `NSPanel` (see
   `tauri-nspanel`). Outside fullscreen it shows normally.
-- **Windows and Linux are written for but never run.** The CI workflow compiles
-  all three; it has not had its first run.
+- **Windows and Linux compile in CI but have not been run by anyone yet.**
 
 ## What it reads
 

@@ -1,0 +1,53 @@
+name: Bug report
+description: Something is broken, or a quota looks wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Never paste tokens, cookies or the contents of auth files. `copia --print` output is safe, but read it first.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: And what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [macOS, Windows, Linux]
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version and desktop
+      placeholder: Windows 11 24H2, macOS 15.2, Ubuntu 24.04 GNOME
+  - type: input
+    id: version
+    attributes:
+      label: Copia version or commit
+    validations:
+      required: true
+  - type: checkboxes
+    id: providers
+    attributes:
+      label: Providers involved
+      options:
+        - label: Claude
+        - label: Codex
+        - label: Gemini
+        - label: OpenCode Go
+        - label: Custom command
+  - type: textarea
+    id: print
+    attributes:
+      label: Output of `copia --print`
+      render: json

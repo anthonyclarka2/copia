@@ -1,0 +1,29 @@
+name: Provider request
+description: Ask for a tool Copia does not read yet, or report how one works
+labels: [provider]
+body:
+  - type: input
+    id: tool
+    attributes:
+      label: Tool or subscription
+      placeholder: Cursor, Copilot, Antigravity
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How can its quota be read?
+      description: A usage endpoint, a CLI command, a local file. Link to documentation or another client's source if you know one. Leave blank if you do not know.
+  - type: textarea
+    id: sample
+    attributes:
+      label: Example reply
+      description: With every token, email and account id removed.
+      render: json
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Can you help?
+      options:
+        - label: I have an account and can test a build
+        - label: I can open a pull request

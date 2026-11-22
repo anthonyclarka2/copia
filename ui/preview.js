@@ -1,7 +1,10 @@
 // Browser-only stand-in for the Tauri backend, so the popover can be designed
-// by opening index.html from any static server. Never loaded inside the app.
+// by opening index.html from any static server. Inside the app Tauri has
+// already defined window.__TAURI__, so this does nothing there. (It is a file
+// rather than an inline script so the app's CSP can be script-src 'self'.)
 // Add ?stress to the URL for long labels, a long error and enough providers to wrap.
 (() => {
+  if (window.__TAURI__) return;
   const now = Math.floor(Date.now() / 1000);
   const q = (label, used, secs) => ({ label, used, resets_at: now + secs });
   const p = (name, quotas, extra = {}) =>

@@ -45,6 +45,9 @@ pub struct Config {
     /// Provider ids to skip: "claude", "codex", "gemini", "opencode-go".
     pub disabled: Vec<String>,
     pub custom: Vec<Custom>,
+    /// Why `custom` was dropped: config.json could be changed by someone else.
+    #[serde(skip)]
+    pub refused: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -60,11 +63,49 @@ impl Config {
     }
 
     pub fn load() -> Config {
-        Self::path()
-            .and_then(read_json)
+        let Some(path) = Self::path() else {
+            return Config::default();
+        };
+        let mut config: Config = read_json(path.clone())
             .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Custom commands run every few minutes, so only take them from a
+        // file that nobody but this user (or root) can change.
+        if !config.custom.is_empty() {
+            if let Err(why) = check_private(&path) {
+                config.custom.clear();
+                config.refused = Some(format!("custom commands not run: {why}"));
+            }
+        }
+        config
     }
+}
+
+/// Ok when `path` (after following links) and the folder it is in are owned
+/// by this user or root and cannot be written by group or others.
+#[cfg(unix)]
+fn check_private(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let real = std::fs::canonicalize(path).map_err(|e| format!("config.json: {e}"))?;
+    let folder = real.parent().ok_or("config.json has no folder")?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let me = unsafe { libc::getuid() };
+    for (what, at) in [("config.json", real.as_path()), ("its folder", folder)] {
+        let meta = std::fs::metadata(at).map_err(|e| format!("{what}: {e}"))?;
+        if meta.uid() != me && meta.uid() != 0 {
+            return Err(format!("{what} belongs to another user"));
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err(format!("{what} can be changed by other users (chmod go-w)"));
+        }
+    }
+    Ok(())
+}
+
+/// Windows: the per-user %APPDATA% folder is private by default.
+#[cfg(not(unix))]
+fn check_private(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
 }
 
 /// Providers whose endpoint details are educated guesses.
@@ -93,6 +134,14 @@ pub fn fetch_all(config: &Config) -> Vec<Provider> {
             let id = format!("custom:{}", custom.name);
             jobs.push((id, custom.name.clone(), scope.spawn(|| run_custom(custom))));
         }
+        let refused = config.refused.clone().map(|error| Provider {
+            id: "custom".into(),
+            name: "Custom".into(),
+            configured: true,
+            quotas: Vec::new(),
+            error: Some(error),
+            experimental: false,
+        });
         jobs.into_iter()
             .map(|(id, name, job)| {
                 let fetched = job.join().unwrap_or_else(|_| Err("crashed".into()));
@@ -107,6 +156,7 @@ pub fn fetch_all(config: &Config) -> Vec<Provider> {
                 let experimental = EXPERIMENTAL.contains(&id.as_str());
                 Provider { id, name, configured, quotas, error, experimental }
             })
+            .chain(refused)
             .collect()
     })
 }
@@ -197,18 +247,24 @@ fn claude() -> Fetched {
     Ok(Some(quotas))
 }
 
-/// On macOS Claude Code keeps its login in the Keychain. Asking the system
-/// `security` tool means macOS itself prompts the user for permission.
+/// On macOS Claude Code keeps its login in the Keychain. It is read through
+/// Security.framework, so macOS asks on Copia's behalf and an "Always Allow"
+/// trusts Copia's own binary. (Running `/usr/bin/security` instead would make
+/// that approval cover every program that can run `security`.)
 #[cfg(target_os = "macos")]
 fn claude_keychain() -> Option<Value> {
-    let out = Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
-        .output()
+    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
+    let found = ItemSearchOptions::new()
+        .class(ItemClass::generic_password())
+        .service("Claude Code-credentials")
+        .load_data(true)
+        .limit(1)
+        .search()
         .ok()?;
-    if !out.status.success() {
-        return None;
+    match found.into_iter().next()? {
+        SearchResult::Data(data) => serde_json::from_slice(&data).ok(),
+        _ => None,
     }
-    serde_json::from_slice(&out.stdout).ok()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -366,16 +422,9 @@ fn opencode_go() -> Fetched {
 /// its stdout — either `[{label, used | remaining, resets_at?}]` or
 /// `{"quotas": [...]}`, with `used` / `remaining` as 0–1 fractions.
 fn run_custom(custom: &Custom) -> Fetched {
-    let (program, args) = custom.command.split_first().ok_or("empty command")?;
-    let out = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("could not run {program}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("{program} exited with {}", out.status));
-    }
+    let stdout = run_limited(&custom.command, CUSTOM_TIMEOUT)?;
     let reply: Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("output is not JSON: {e}"))?;
+        serde_json::from_slice(&stdout).map_err(|e| format!("output is not JSON: {e}"))?;
     let list = match &reply["quotas"] {
         Value::Null => &reply,
         found => found,
@@ -394,6 +443,72 @@ fn run_custom(custom: &Custom) -> Fetched {
         });
     }
     Ok(Some(quotas))
+}
+
+/// A custom command gets this long to answer. Every provider is waited for
+/// before the popover updates, so one that hangs must not hang the rest.
+const CUSTOM_TIMEOUT: Duration = Duration::from_secs(15);
+/// More stdout than this is not a quota list.
+const CUSTOM_MAX_OUTPUT: u64 = 1024 * 1024;
+
+/// Run `command` and return its stdout, killing it if it runs past `timeout`
+/// or prints more than `CUSTOM_MAX_OUTPUT` bytes.
+fn run_limited(command: &[String], timeout: Duration) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+
+    let (program, args) = command.split_first().ok_or("empty command")?;
+    let deadline = std::time::Instant::now() + timeout;
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not run {program}: {e}"))?;
+
+    // Read stdout on its own thread so the deadline holds even while the
+    // command is still printing (or keeps the pipe open and prints nothing).
+    let mut pipe = child.stdout.take().ok_or("no stdout")?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let read = (&mut pipe).take(CUSTOM_MAX_OUTPUT + 1).read_to_end(&mut buf);
+        let _ = tx.send(read.map(|_| buf));
+    });
+
+    let stop = |child: &mut std::process::Child, why: String| {
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(why)
+    };
+    let stdout = match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        Ok(Ok(buf)) if buf.len() as u64 > CUSTOM_MAX_OUTPUT => {
+            return stop(&mut child, format!("{program} printed more than 1 MB"));
+        }
+        Ok(Ok(buf)) => buf,
+        Ok(Err(e)) => return stop(&mut child, format!("could not read {program}: {e}")),
+        Err(_) => return stop(&mut child, format!("{program} took longer than {}s", timeout.as_secs())),
+    };
+
+    // Stdout is closed; give the command the rest of its time to exit.
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                return stop(&mut child, format!("{program} took longer than {}s", timeout.as_secs()))
+            }
+            Err(e) => return stop(&mut child, format!("could not wait for {program}: {e}")),
+        }
+    };
+    if !status.success() {
+        return Err(format!("{program} exited with {status}"));
+    }
+    Ok(stdout)
 }
 
 // --------------------------------------------------------------- Helpers ---
@@ -470,4 +585,73 @@ pub fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    fn cmd(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn custom_command_output_is_read() {
+        let out = run_limited(&cmd(&["/bin/echo", "[1]"]), Duration::from_secs(5)).unwrap();
+        assert_eq!(out, b"[1]\n");
+    }
+
+    #[test]
+    fn custom_command_failure_is_reported() {
+        let err = run_limited(&cmd(&["/usr/bin/false"]), Duration::from_secs(5)).unwrap_err();
+        assert!(err.contains("exited with"), "{err}");
+    }
+
+    #[test]
+    fn custom_command_that_hangs_is_killed() {
+        let started = Instant::now();
+        let err = run_limited(&cmd(&["/bin/sleep", "30"]), Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("took longer"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn custom_command_that_closes_stdout_but_keeps_running_is_killed() {
+        let started = Instant::now();
+        let command = cmd(&["/bin/sh", "-c", "exec >&-; sleep 30"]);
+        let err = run_limited(&command, Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("took longer"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn custom_command_that_floods_stdout_is_stopped() {
+        let err = run_limited(&cmd(&["/usr/bin/yes"]), Duration::from_secs(10)).unwrap_err();
+        assert!(err.contains("more than 1 MB"), "{err}");
+    }
+
+    #[test]
+    fn config_writable_by_others_is_refused() {
+        let dir = std::env::temp_dir().join(format!("copia-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.json");
+        std::fs::write(&file, "{}").unwrap();
+        let mode = |p: &std::path::Path, m| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+
+        mode(&dir, 0o700);
+        mode(&file, 0o600);
+        assert_eq!(check_private(&file), Ok(()));
+
+        mode(&file, 0o666);
+        assert!(check_private(&file).unwrap_err().starts_with("config.json"));
+
+        mode(&file, 0o600);
+        mode(&dir, 0o777);
+        assert!(check_private(&file).unwrap_err().starts_with("its folder"));
+
+        mode(&dir, 0o700);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

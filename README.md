@@ -54,8 +54,12 @@ is sent only to the vendor it belongs to.
 
 Things to know:
 
-- On macOS the first Claude fetch makes the system ask whether `security` may
-  read the Keychain item. Choose *Always Allow* or it asks every refresh.
+- On macOS the first Claude fetch makes the system ask whether Copia may read
+  the Keychain item. Choose *Always Allow* or it asks every refresh. The
+  approval is for Copia's own signed app only, so a rebuilt development binary
+  asks again. (Versions before this one asked on behalf of `/usr/bin/security`,
+  which let any program read the token. If you allowed that, remove `security`
+  from the item's *Access Control* tab in Keychain Access.)
 - None of these are documented public APIs. They are what the vendors' own
   tools call and can change without notice.
 - Copia never refreshes tokens. When one ages out the bar is replaced by
@@ -153,13 +157,21 @@ ISO-8601 time:
 ]
 ```
 
+A custom command gets 15 seconds and 1 MB of output; past either it is stopped
+and its bar shows why. Because these commands run on every refresh, on macOS
+and Linux Copia runs them only when `config.json` and its folder belong to you
+and cannot be written by group or others (`chmod go-w`); otherwise it skips
+them and says so in the popover.
+
 ## Layout
 
 ```
 src/main.rs        tray icon, popover window, refresh loop
 src/providers.rs   one function per tool: read credential, fetch, map to quotas
 src/icon.rs        draws the tray icon's bars
-ui/index.html      the popover (plain HTML/CSS/JS, no build step)
+ui/index.html      the popover (plain HTML, CSS and JS, no build step)
+ui/style.css       its styles
+ui/app.js          its script (kept out of the HTML for the strict CSP)
 ui/preview.js      demo stand-in so index.html can be opened in a browser
 scripts/make_icons.py   regenerates icons/
 ```

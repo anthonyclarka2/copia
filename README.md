@@ -27,10 +27,11 @@ Early, and honest about it:
 
 - **Built and run on macOS only** (Apple silicon), with demo data. The tray
   icon, the popover and its layout work there.
-- **Claude has been fetched from a live account** (22 Nov 2026) and returned
-  its 5-hour and weekly windows. **Codex, Gemini and OpenCode Go have not been
-  tried against a real account**; their code follows the endpoints listed
-  below, so expect to fix field names.
+- **Claude and Codex have been fetched from live accounts** (22 Nov 2026).
+  Claude returned its 5-hour and weekly windows; Codex returned one weekly
+  window. **Gemini and OpenCode Go have not been tried against a real
+  account**; their code follows the endpoints listed below, so expect to fix
+  field names.
 - **macOS fullscreen:** the popover did not come on screen while another app
   was in a fullscreen Space. It likely needs to become an `NSPanel` (see
   `tauri-nspanel`). Outside fullscreen it shows normally.

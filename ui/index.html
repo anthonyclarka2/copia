@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Copia</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f5f1; --ink: #1d2430; --muted: #6b7482; --line: #dcd9d0; --track: #e4e1d8;
+    --good: #2f9e6b; --warn: #c98a12; --low: #d2493f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #181f2a; --ink: #e9edf3; --muted: #8e99a8; --line: #2b3545; --track: #2b3545;
+      --good: #56c48c; --warn: #f0be50; --low: #ec6e64;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); overflow: hidden; }
+  body {
+    font: 12px/1.3 system-ui, -apple-system, "Segoe UI", sans-serif;
+    width: max-content; min-width: 200px; max-width: 880px;
+    padding: 12px 14px 10px; user-select: none; cursor: default;
+  }
+  header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
+  h1 { font-size: 13px; margin: 0; letter-spacing: .04em; }
+  #when { color: var(--muted); font-size: 11px; flex: 1; white-space: nowrap; }
+  button {
+    font: inherit; color: var(--muted); background: none; border: 1px solid var(--line);
+    border-radius: 6px; padding: 2px 8px; cursor: pointer;
+  }
+  button:hover { color: var(--ink); }
+  button:disabled { opacity: .5; cursor: default; }
+
+  #groups { display: flex; gap: 18px; align-items: flex-end; }
+  .group { display: flex; flex-direction: column; align-items: center; gap: 7px; }
+  .group + .group { border-left: 1px solid var(--line); padding-left: 18px; }
+  .bars { display: flex; gap: 10px; }
+  .name { font-weight: 600; white-space: nowrap; }
+
+  .quota { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 38px; }
+  .pct { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .track {
+    width: 20px; height: 110px; border-radius: 6px; background: var(--track);
+    display: flex; align-items: flex-end; overflow: hidden;
+  }
+  .fill { width: 100%; background: var(--good); min-height: 2px; transition: height .3s; }
+  .warn .fill { background: var(--warn); }
+  .low .fill { background: var(--low); }
+  .low .pct { color: var(--low); }
+  .label { white-space: nowrap; }
+  .reset { color: var(--muted); font-size: 10px; white-space: nowrap; min-height: 13px; }
+
+  .trouble { width: 96px; height: 110px; color: var(--muted); font-size: 11px;
+    display: flex; align-items: center; text-align: center; overflow-wrap: anywhere; }
+  #empty { color: var(--muted); max-width: 250px; white-space: normal; }
+  footer { margin-top: 10px; padding-top: 7px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>COPIA</h1>
+  <span id="when"></span>
+  <button id="refresh" title="Fetch the quotas again">Refresh</button>
+</header>
+<main id="groups"></main>
+<footer id="foot"></footer>
+
+<script>if (!window.__TAURI__) document.write('<script src="preview.js"><\/script>');</script>
+<script>
+const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = text;
+  return node;
+};
+
+let last = null;
+
+// "resets_at" is epoch seconds or an ISO string; say how long from now.
+function until(resetsAt) {
+  if (resetsAt == null) return "";
+  const at = typeof resetsAt === "number" ? resetsAt * 1000 : Date.parse(resetsAt);
+  const mins = Math.round((at - Date.now()) / 60000);
+  if (!Number.isFinite(mins)) return "";
+  if (mins <= 0) return "resets now";
+  if (mins < 60) return `in ${mins}m`;
+  if (mins < 48 * 60) return `in ${Math.floor(mins / 60)}h ${mins % 60}m`;
+  return `in ${Math.round(mins / 1440)}d`;
+}
+
+function quotaBar(q) {
+  const left = Math.max(0, Math.min(1, 1 - q.used));
+  const pct = Math.round(left * 100);
+  const box = el("div", "quota" + (left < 0.2 ? " low" : left < 0.5 ? " warn" : ""));
+  box.title = `${pct}% left, ${100 - pct}% used`;
+  box.append(el("div", "pct", pct + "%"));
+  const track = el("div", "track");
+  const fill = el("div", "fill");
+  fill.style.height = pct + "%";
+  track.append(fill);
+  box.append(track, el("div", "label", q.label), el("div", "reset", until(q.resets_at)));
+  return box;
+}
+
+function render(snap) {
+  last = snap;
+  const groups = document.getElementById("groups");
+  groups.replaceChildren();
+  const active = snap.providers.filter(p => p.configured);
+  const missing = snap.providers.filter(p => !p.configured).map(p => p.name);
+
+  for (const p of active) {
+    const group = el("section", "group");
+    if (p.error) {
+      group.append(el("div", "trouble", p.error));
+    } else {
+      const bars = el("div", "bars");
+      bars.append(...p.quotas.map(quotaBar));
+      group.append(bars);
+    }
+    group.append(el("div", "name", p.name));
+    groups.append(group);
+  }
+  if (!active.length) {
+    groups.append(el("div", null, snap.loading ? "Fetching quotas…" :
+      "No signed-in coding tools found on this computer. Sign in with claude, codex, gemini or opencode, then refresh."));
+    groups.firstChild.id = "empty";
+  }
+
+  const when = document.getElementById("when");
+  if (snap.loading) when.textContent = "refreshing…";
+  else if (snap.updated_at) when.textContent = "as of " +
+    new Date(snap.updated_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  document.getElementById("refresh").disabled = snap.loading;
+
+  const notes = ["Bars show what is left."];
+  if (snap.demo) notes.unshift("Demo data.");
+  if (missing.length && active.length) notes.push("Not signed in: " + missing.join(", ") + ".");
+  document.getElementById("foot").textContent = notes.join("  ");
+
+  // Measured synchronously: a hidden popover gets no animation frames.
+  const box = document.body.getBoundingClientRect();
+  invoke("fit", { width: Math.ceil(box.width), height: Math.ceil(box.height) });
+}
+
+const load = () => invoke("get_snapshot").then(render);
+document.getElementById("refresh").addEventListener("click", () => invoke("refresh"));
+document.addEventListener("keydown", e => { if (e.key === "r") invoke("refresh"); });
+listen("snapshot", load);
+// Keep the "in 2h 5m" countdowns honest while the popover stays open.
+setInterval(() => { if (last && !document.hidden) render(last); }, 60000);
+load();
+</script>
+</body>
+</html>

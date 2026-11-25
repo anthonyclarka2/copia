@@ -43,7 +43,7 @@ body:
       options:
         - label: Claude
         - label: Codex
-        - label: Gemini
+        - label: Antigravity
         - label: OpenCode Go
         - label: Custom command
   - type: textarea

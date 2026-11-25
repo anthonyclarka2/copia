@@ -14,7 +14,7 @@ and has no browser chrome, URL or scrolling page.
 ## Users
 
 Developers who pay for two or more AI coding subscriptions (Claude, Codex /
-ChatGPT, Gemini, OpenCode and similar). They glance at Copia in the middle of
+ChatGPT, Antigravity, OpenCode and similar). They glance at Copia in the middle of
 a task to decide which tool still has room, then go straight back to work.
 
 ## Product Purpose
@@ -56,10 +56,11 @@ of providers.
 
 ## Capabilities and Constraints
 
-- Built-in providers: Claude, Codex, Gemini CLI, OpenCode Go. Each reuses the
-  sign-in that vendor's own CLI left on the machine and asks that vendor's
-  usage endpoint. Only OpenCode Go's endpoint is documented by its vendor; the
-  others are what the vendors' own tools call and can change without notice.
+- Built-in providers: Claude, Codex, Antigravity (`agy`), OpenCode Go. Each reuses
+  the sign-in that vendor's own CLI left on the machine (with Antigravity queried
+  via `agy -p /usage --output-format json`) and asks that vendor's usage source.
+  Only OpenCode Go's endpoint is documented by its vendor; the others are what
+  the vendors' own tools call and can change without notice.
 - Claude can have several sign-ins: the default `~/.claude` one and one per
   extra Claude Code config folder (`CLAUDE_CONFIG_DIR`), each shown as its own
   provider, such as "Claude (personal)". The Claude desktop app's sign-in is
@@ -73,13 +74,11 @@ of providers.
   coloured by level.
 - Terminology: "provider" (a tool/vendor), "quota" (one window of one
   provider), "left" / "remaining" for the fraction shown.
-- Not built: Antigravity, OpenCode Zen balance, Cursor, Copilot.
+- Not built: OpenCode Zen balance, Cursor, Copilot.
 - A provider nobody has run against a live account is flagged experimental
   and shown as "unverified" in the popover. Today that is OpenCode Go.
 - Known gap: on macOS the popover does not appear over another app's
   fullscreen Space.
-- Known gap: Gemini is also untested against a live account but is not yet
-  flagged "unverified" in the app.
 - Known gap: OpenCode v2 keeps credentials in a SQLite database Copia does not
   read; those users must set `OPENCODE_API_KEY`.
 - Undecided: whether Copia ever refreshes expired tokens itself; whether it
@@ -105,9 +104,9 @@ of providers.
   https://github.com/potpiemuncher/copia/releases with installers for Windows,
   macOS (universal) and Linux, plus SHA-256 checksums.
 - Verified by use: macOS on Apple silicon; Claude and Codex against live
-  accounts (22 November 2026).
+  accounts (22 November 2026), and Antigravity (24 November 2026, agy 1.5.16).
 - Not verified: Windows, Linux and Intel Macs have never been run by anyone;
-  Gemini and OpenCode Go have never been run with a real account. Any claim
+  OpenCode Go has never been run with a real account. Any claim
   that Copia "works with" one of these must carry that caveat until it is
   confirmed.
 - Turned in on Rainshare on 22 November 2026; not yet marked done by the

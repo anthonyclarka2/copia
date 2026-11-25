@@ -106,7 +106,7 @@ function render(snap) {
   const empty = $("empty");
   empty.hidden = active.length > 0;
   empty.textContent = snap.loading ? "Fetching quotas…" :
-    "No signed-in coding tools found on this computer. Sign in with claude, codex, gemini or opencode, then refresh.";
+    "No signed-in coding tools found on this computer. Sign in with claude, codex, agy or opencode, then refresh.";
 
   const when = snap.loading ? "refreshing…" : snap.updated_at ? "as of " +
     new Date(snap.updated_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";

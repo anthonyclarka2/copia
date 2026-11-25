@@ -264,7 +264,7 @@ mod tests {
     fn windows_tooltip_fits_four_providers() {
         let all = [
             provider("Claude", &[("5h", 0.38), ("week", 0.61), ("opus", 0.2), ("sonnet", 0.3)], None),
-            provider("Gemini", &[], Some("sign-in expired — run `gemini` once to renew it")),
+            provider("Antigravity", &[], Some("sign-in expired — run `agy` once to renew it")),
             provider("Codex", &[("5h", 0.12), ("week", 0.87)], None),
             provider("OpenCode Go", &[("5h", 0.05), ("week", 0.44), ("month", 0.7)], None),
         ];

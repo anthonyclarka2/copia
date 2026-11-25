@@ -12,7 +12,12 @@
   const providers = [
     p("Claude", [q("5h", 0.38, 8900), q("week", 0.61, 259200)]),
     p("Codex", [q("5h", 0.12, 14400), q("week", 0.87, 432000)]),
-    p("Gemini", [], { error: "sign-in expired — run `gemini` once to renew it" }),
+    p("Antigravity", [
+      q("gemini 5h", 0.08, 17800),
+      q("gemini wk", 0.25, 518400),
+      { label: "other 5h", used: 0.0, resets_at: null },
+      q("other wk", 0.15, 432000),
+    ]),
     p("OpenCode Go", [q("5h", 0.05, 3600), q("week", 0.44, 172800), q("month", 1, 900000)], { experimental: true }),
     p("Cursor", [], { configured: false }),
   ];

@@ -11,7 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -42,8 +43,8 @@ pub struct Provider {
 #[serde(default)]
 pub struct Config {
     pub refresh_minutes: Option<u64>,
-    /// Provider ids to skip: "claude", "claude:<folder>", "codex", "gemini",
-    /// "opencode-go".
+    /// Provider ids to skip: "claude", "claude:<folder>", "codex",
+    /// "antigravity", "opencode-go".
     pub disabled: Vec<String>,
     pub custom: Vec<Custom>,
     /// Extra Claude Code config folders (`CLAUDE_CONFIG_DIR`) to read a
@@ -160,7 +161,7 @@ pub fn fetch_all(config: &Config) -> Vec<Provider> {
 fn fetch_all_with(config: &Config, claude_logins: Vec<ClaudeLogin>) -> Vec<Provider> {
     let builtin: [(&str, &str, fn() -> Fetched); 3] = [
         ("codex", "Codex", codex),
-        ("gemini", "Gemini", gemini),
+        ("antigravity", "Antigravity", antigravity),
         ("opencode-go", "OpenCode Go", opencode_go),
     ];
     let disabled = |id: &str| config.disabled.iter().any(|d| d == id);
@@ -253,9 +254,14 @@ pub fn demo() -> Vec<Provider> {
             vec![quota("5h", 0.12, 4 * 3600), quota("week", 0.87, 5 * 86400)],
         ),
         provider(
-            "gemini",
-            "Gemini",
-            vec![quota("pro", 0.95, 9 * 3600), quota("flash", 0.20, 9 * 3600)],
+            "antigravity",
+            "Antigravity",
+            vec![
+                quota("gemini 5h", 0.08, 4 * 3600 + 3400),
+                quota("gemini wk", 0.25, 6 * 86400),
+                quota("other 5h", 0.0, 5 * 3600),
+                quota("other wk", 0.15, 5 * 86400),
+            ],
         ),
         provider(
             "opencode-go",
@@ -487,7 +493,6 @@ fn claude(creds: ClaudeCreds, cli: &str) -> Fetched {
             .get("https://api.anthropic.com/api/oauth/usage")
             .set("Authorization", &format!("Bearer {token}"))
             .set("anthropic-beta", "oauth-2025-04-20"),
-        None,
     )
     .map_err(|e| stale(e, cli))?;
 
@@ -591,7 +596,7 @@ fn codex() -> Fetched {
     if let Some(account) = auth.pointer("/tokens/account_id").and_then(Value::as_str) {
         request = request.set("ChatGPT-Account-Id", account);
     }
-    let reply = send(request, None).map_err(|e| stale(e, "codex"))?;
+    let reply = send(request).map_err(|e| stale(e, "codex"))?;
 
     let mut quotas = Vec::new();
     for key in ["primary_window", "secondary_window"] {
@@ -614,59 +619,406 @@ fn codex() -> Fetched {
     Ok(Some(quotas))
 }
 
-// ---------------------------------------------------------------- Gemini ---
+// ----------------------------------------------------------- Antigravity ---
 
-fn gemini() -> Fetched {
-    let Some(creds) = dirs::home_dir().and_then(|h| read_json(h.join(".gemini/oauth_creds.json"))) else {
+const ANTIGRAVITY_TIMEOUT: Duration = Duration::from_secs(15);
+const ANTIGRAVITY_SIGN_IN_ERR: &str = "sign-in expired — run `agy` once to renew it";
+
+fn antigravity() -> Fetched {
+    use std::io::IsTerminal;
+    let Some(agy) = find_agy()? else {
         return Ok(None);
     };
-    let Some(token) = creds["access_token"].as_str() else {
+    if !antigravity_signed_in() {
         return Ok(None);
+    }
+    let probe = ProbeDir::create()?;
+    let own_group = !std::io::stdin().is_terminal();
+    let command = [
+        agy.to_string_lossy().into_owned(),
+        "-p".into(),
+        "/usage".into(),
+        "--output-format".into(),
+        "json".into(),
+    ];
+    // `AGY_CLI_DISABLE_AUTO_UPDATE` keeps background refreshes from mutating
+    // the binary. `SSH_CONNECTION` puts `agy` into its remote-SSH OAuth path
+    // on every platform (macOS, Linux and Windows), so a lapsed sign-in prints
+    // an auth URL to stderr instead of opening a browser (`open`, `xdg-open`
+    // or `rundll32`). On Unix we also prepend failing `open`/`xdg-open` stubs
+    // and set `BROWSER` as defense-in-depth.
+    #[cfg(unix)]
+    let env = {
+        let mut paths = vec![probe.0.clone()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let path_env =
+            std::env::join_paths(paths).unwrap_or_else(|_| probe.0.as_os_str().to_os_string());
+        [
+            ("AGY_CLI_DISABLE_AUTO_UPDATE", OsString::from("true")),
+            ("SSH_CONNECTION", OsString::from("127.0.0.1 0 127.0.0.1 0")),
+            ("PATH", path_env),
+            ("BROWSER", probe.0.join("open").into_os_string()),
+        ]
     };
-    // Copia does not refresh tokens (that needs the Gemini CLI's own OAuth
-    // client secret), so an expired one is reported instead of used.
-    if let Some(expiry_ms) = creds["expiry_date"].as_f64() {
-        if expiry_ms < now_secs() as f64 * 1000.0 {
-            return Err("sign-in expired — run `gemini` once to renew it".into());
+    #[cfg(not(unix))]
+    let env = [
+        ("AGY_CLI_DISABLE_AUTO_UPDATE", OsString::from("true")),
+        ("SSH_CONNECTION", OsString::from("127.0.0.1 0 127.0.0.1 0")),
+    ];
+
+    let result = run_limited_with(
+        &command,
+        ANTIGRAVITY_TIMEOUT,
+        own_group,
+        &env,
+        Some(&probe.0),
+        true,
+        Some(antigravity_asks_for_sign_in),
+    );
+    Ok(Some(antigravity_from_run(result)?))
+}
+
+/// `agy 1.5.16` prints "Authentication required..." on stderr once its silent
+/// sign-in renewal has failed, then waits 60s for an OAuth code that a
+/// background refresh will never type. Stopping there keeps an expired
+/// sign-in from holding every refresh for the whole timeout.
+fn antigravity_asks_for_sign_in(stderr: &str) -> bool {
+    // Only a line that starts with the ask, not a log line that mentions it.
+    stderr
+        .lines()
+        .any(|line| line.trim_start().to_ascii_lowercase().starts_with("authentication required"))
+}
+
+fn antigravity_from_run(result: Result<CommandOutput, RunError>) -> Result<Vec<Quota>, String> {
+    match result {
+        Ok(out) => match serde_json::from_slice::<Value>(&out.stdout) {
+            // Parse the JSON envelope even on non-zero exit: `agy` exits 1 with
+            // `{"status": "ERROR", "error": "..."}` when a run fails.
+            Ok(reply) => antigravity_quotas(&reply),
+            Err(_) if !out.status.success() => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if is_antigravity_auth_error(&stderr) {
+                    Err(ANTIGRAVITY_SIGN_IN_ERR.into())
+                } else {
+                    Err(format!("agy exited with {}", out.status))
+                }
+            }
+            Err(e) => Err(format!("unreadable reply: {e}")),
+        },
+        // Stopped by `antigravity_asks_for_sign_in`: it already saw the ask, so
+        // don't depend on the stderr bytes having arrived in time.
+        Err(RunError::Interrupted(_)) => Err(ANTIGRAVITY_SIGN_IN_ERR.into()),
+        Err(RunError::TimedOut { message, stderr }) => {
+            // Timed out after printing some other sign-in complaint?
+            let stderr = String::from_utf8_lossy(&stderr);
+            if is_antigravity_auth_error(&stderr) {
+                Err(ANTIGRAVITY_SIGN_IN_ERR.into())
+            } else {
+                Err(message)
+            }
+        }
+        Err(RunError::Failed(message)) => Err(message),
+    }
+}
+
+/// Whether this machine has an Antigravity sign-in to query, so an installed
+/// but never-signed-in (or logged-out) `agy` is left out instead of failing.
+fn antigravity_signed_in() -> bool {
+    if std::env::var("AGY_ADC_AUTH")
+        .ok()
+        .is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
+    {
+        return true;
+    }
+    let home = dirs::home_dir();
+    if home.as_deref().is_some_and(antigravity_adc_enabled) {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(present) = antigravity_keychain_exists() {
+        return present;
+    }
+    home.as_deref().is_some_and(antigravity_has_local_state)
+}
+
+/// Metadata-only check for `agy`'s login Keychain entry (`service = "gemini"`,
+/// `account = "antigravity"`). Does not read secret data and never prompts.
+#[cfg(target_os = "macos")]
+fn antigravity_keychain_exists() -> Option<bool> {
+    use security_framework::item::{ItemClass, ItemSearchOptions};
+    // errSecItemNotFound: no stored Antigravity sign-in in the Keychain.
+    const ITEM_NOT_FOUND: i32 = -25300;
+    match ItemSearchOptions::new()
+        .class(ItemClass::generic_password())
+        .service("gemini")
+        .account("antigravity")
+        .load_attributes(true)
+        .limit(1)
+        .search()
+    {
+        Ok(found) => Some(!found.is_empty()),
+        Err(e) if e.code() == ITEM_NOT_FOUND => Some(false),
+        // Locked or unavailable Keychain: fall back to on-disk state markers.
+        Err(_) => None,
+    }
+}
+
+fn antigravity_adc_enabled(home: &Path) -> bool {
+    read_json(home.join(".gemini/config/config.json"))
+        .and_then(|v| v.pointer("/userSettings/enableAdc")?.as_bool())
+        == Some(true)
+}
+
+/// On Linux and Windows (and on macOS if the Keychain is unavailable), check
+/// the onboarding marker `agy` writes once signed in. It lives in agy's cache
+/// folder, which agy's docs say `/logout` clears. (The Antigravity desktop app's own state
+/// file is not a sign-in to `agy`, so it is not counted.)
+fn antigravity_has_local_state(home: &Path) -> bool {
+    read_json(home.join(".gemini/antigravity-cli/cache/onboarding.json"))
+        .and_then(|v| v["onboardingComplete"].as_bool())
+        == Some(true)
+}
+
+fn find_agy() -> Result<Option<PathBuf>, String> {
+    let override_path = std::env::var_os("ANTIGRAVITY_CLI_PATH");
+    let path_var = std::env::var_os("PATH");
+    let home = dirs::home_dir();
+
+    #[cfg(unix)]
+    let fallbacks: Vec<PathBuf> = [
+        Some(PathBuf::from("/opt/homebrew/bin/agy")),
+        Some(PathBuf::from("/usr/local/bin/agy")),
+        home.as_ref().map(|h| h.join(".local/bin/agy")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    // Official Windows installer (`install.ps1` / `install.cmd`) places a
+    // standalone `agy.exe` at `%LOCALAPPDATA%\agy\bin\agy.exe`.
+    #[cfg(windows)]
+    let fallbacks: Vec<PathBuf> =
+        dirs::data_local_dir().map(|d| d.join("agy").join("bin").join("agy.exe")).into_iter().collect();
+
+    find_agy_in(override_path.as_deref(), path_var.as_deref(), home.as_deref(), &fallbacks)
+}
+
+fn find_agy_in(
+    override_path: Option<&std::ffi::OsStr>,
+    path_var: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+    fallbacks: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
+    if let Some(raw) = override_path.filter(|p| !p.is_empty()) {
+        let path = match (raw.to_str(), home) {
+            (Some(text), Some(home)) => expand_home(text, home),
+            _ => PathBuf::from(raw),
+        };
+        if !is_executable_file(&path) {
+            return Err("ANTIGRAVITY_CLI_PATH does not point to agy".into());
+        }
+        return Ok(Some(std::fs::canonicalize(&path).unwrap_or(path)));
+    }
+
+    let exe = if cfg!(windows) { "agy.exe" } else { "agy" };
+    if let Some(path_var) = path_var {
+        for dir in std::env::split_paths(path_var) {
+            let candidate = dir.join(exe);
+            if is_executable_file(&candidate) {
+                return Ok(Some(std::fs::canonicalize(&candidate).unwrap_or(candidate)));
+            }
         }
     }
 
-    let reply = send(
-        agent()
-            .post("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
-            .set("Authorization", &format!("Bearer {token}")),
-        Some(json!({})),
-    )
-    .map_err(|e| stale(e, "gemini"))?;
+    Ok(fallbacks
+        .iter()
+        .find(|p| is_executable_file(p))
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
+}
 
-    // One bucket per model; show the tightest bucket of each model tier.
-    let mut quotas: Vec<Quota> = Vec::new();
-    for bucket in reply["buckets"].as_array().into_iter().flatten() {
-        let Some(remaining) = bucket["remainingFraction"].as_f64() else {
-            continue;
-        };
-        let model = bucket["modelId"].as_str().unwrap_or("quota");
-        let label = if model.contains("flash-lite") {
-            "lite"
-        } else if model.contains("flash") {
-            "flash"
-        } else if model.contains("pro") {
-            "pro"
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Private temporary directory used as `current_dir` for `agy` (and on Unix
+/// to hold failing `open`/`xdg-open` stubs as defense-in-depth against
+/// background browser launches).
+struct ProbeDir(PathBuf);
+
+impl ProbeDir {
+    fn create() -> Result<Self, String> {
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
+        let base = std::env::temp_dir();
+        let pid = std::process::id();
+        let mut created = None;
+        for _ in 0..8 {
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let r1 = RandomState::new().hash_one(seq);
+            let r2 = RandomState::new().hash_one((pid, seq));
+            let path = base.join(format!("copia-agy-{r1:016x}{r2:016x}"));
+            #[cfg(unix)]
+            let create_res = {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new().mode(0o700).create(&path)
+            };
+            #[cfg(not(unix))]
+            let create_res = std::fs::DirBuilder::new().create(&path);
+            match create_res {
+                Ok(()) => {
+                    created = Some(ProbeDir(path));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("could not create temp dir: {e}")),
+            }
+        }
+        let dir = created.ok_or("could not create unique temp dir")?;
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            for name in ["open", "xdg-open"] {
+                let stub = dir.0.join(name);
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o700)
+                    .open(&stub)
+                    .map_err(|e| format!("could not create {name} stub: {e}"))?;
+                file.write_all(b"#!/bin/sh\nexit 1\n")
+                    .map_err(|e| format!("could not write {name} stub: {e}"))?;
+            }
+        }
+        Ok(dir)
+    }
+}
+
+impl Drop for ProbeDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn is_antigravity_auth_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "unauthenticated",
+        "authentication required",
+        "authentication failed",
+        "not signed in",
+        "not logged in",
+        "login required",
+        "sign-in expired",
+        "sign in expired",
+        "token expired",
+        "session expired",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+}
+
+fn antigravity_quotas(reply: &Value) -> Result<Vec<Quota>, String> {
+    let ok = reply["status"].as_str() == Some("SUCCESS")
+        && reply["command"]["name"].as_str() == Some("usage");
+    if !ok {
+        let raw = reply["error"]
+            .as_str()
+            .or_else(|| reply["response"].as_str())
+            .unwrap_or("");
+        if is_antigravity_auth_error(raw) {
+            return Err(ANTIGRAVITY_SIGN_IN_ERR.into());
+        }
+        let detail: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        let detail: String = detail.chars().take(120).collect();
+        return Err(if detail.is_empty() {
+            "could not read quotas — run `agy` once to check sign-in".into()
         } else {
-            model
-        };
-        let quota = Quota {
-            label: label.into(),
-            used: fraction(1.0 - remaining),
-            resets_at: some(&bucket["resetTime"]),
-        };
-        match quotas.iter_mut().find(|q| q.label == label) {
-            Some(existing) if existing.used < quota.used => *existing = quota,
-            Some(_) => {}
-            None => quotas.push(quota),
+            format!("agy: {detail}")
+        });
+    }
+
+    let groups = reply["command"]["data"]["groups"]
+        .as_array()
+        .ok_or("no quota groups in reply")?;
+    let mut quotas = Vec::new();
+    for group in groups {
+        let group_name = group["name"].as_str().unwrap_or("");
+        let mut buckets: Vec<&Value> =
+            group["buckets"].as_array().into_iter().flatten().collect();
+        buckets.sort_by_key(|b| match b["window"].as_str() {
+            Some("5h") => 0,
+            Some("weekly") => 1,
+            _ => 2,
+        });
+        for bucket in buckets {
+            let Some(remaining) = bucket["remaining_fraction"].as_f64() else {
+                continue;
+            };
+            let id = bucket["id"].as_str().unwrap_or("");
+            let window = bucket["window"].as_str().unwrap_or("");
+            quotas.push(Quota {
+                label: antigravity_label(id, window, group_name),
+                used: fraction(1.0 - remaining),
+                resets_at: antigravity_reset(&bucket["reset_time"]),
+            });
         }
     }
-    Ok(Some(quotas))
+    Ok(quotas)
+}
+
+fn antigravity_label(id: &str, window: &str, group_name: &str) -> String {
+    match id {
+        "gemini-5h" => "gemini 5h".into(),
+        "gemini-weekly" => "gemini wk".into(),
+        "3p-5h" => "other 5h".into(),
+        "3p-weekly" => "other wk".into(),
+        _ => {
+            let win = if window == "weekly" { "wk" } else { window };
+            let prefix = if group_name.to_ascii_lowercase().contains("gemini") {
+                "gemini"
+            } else if !group_name.is_empty() {
+                "other"
+            } else {
+                ""
+            };
+            match (prefix.is_empty(), win.is_empty()) {
+                (false, false) => format!("{prefix} {win}"),
+                (true, false) => win.into(),
+                (_, true) if !id.is_empty() => id.into(),
+                _ => "quota".into(),
+            }
+        }
+    }
+}
+
+fn antigravity_reset(value: &Value) -> Option<Value> {
+    let v = some(value)?;
+    if let Some(s) = v.as_str() {
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed.starts_with("1970-01-01T00:00:00") {
+            return None;
+        }
+    }
+    Some(v)
 }
 
 // ----------------------------------------------------------- OpenCode Go ---
@@ -695,7 +1047,6 @@ fn opencode_go() -> Fetched {
         agent()
             .get("https://opencode.ai/inference/go/v1/usage")
             .set("Authorization", &format!("Bearer {key}")),
-        None,
     )
     .map_err(|e| {
         if e.starts_with("HTTP 401") {
@@ -765,6 +1116,31 @@ fn run_custom(custom: &Custom) -> Fetched {
 const CUSTOM_TIMEOUT: Duration = Duration::from_secs(15);
 /// More stdout than this is not a quota list.
 const CUSTOM_MAX_OUTPUT: u64 = 1024 * 1024;
+/// Bounded prefix of stderr kept for diagnostics when `capture_stderr` is set.
+const STDERR_CAPTURE_LIMIT: usize = 8 * 1024;
+
+struct CommandOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    status: std::process::ExitStatus,
+}
+
+enum RunError {
+    Failed(String),
+    TimedOut { message: String, stderr: Vec<u8> },
+    /// Stopped early because its stderr matched the `stop_on_stderr` test.
+    Interrupted(String),
+}
+
+impl RunError {
+    fn into_message(self) -> String {
+        match self {
+            RunError::Failed(msg)
+            | RunError::TimedOut { message: msg, .. }
+            | RunError::Interrupted(msg) => msg,
+        }
+    }
+}
 
 /// Run `command` and return its stdout, killing it if it runs past `timeout`
 /// or prints more than `CUSTOM_MAX_OUTPUT` bytes.
@@ -775,26 +1151,65 @@ const CUSTOM_MAX_OUTPUT: u64 = 1024 * 1024;
 /// Copia runs in a terminal, so Ctrl-C still reaches the command and it can
 /// still prompt on the terminal (ssh, gpg…). Windows always uses a Job Object.
 fn run_limited(command: &[String], timeout: Duration, own_group: bool) -> Result<Vec<u8>, String> {
+    let out = run_limited_with(command, timeout, own_group, &[], None, false, None)
+        .map_err(RunError::into_message)?;
+    if !out.status.success() {
+        let program = command.first().map(String::as_str).unwrap_or("command");
+        return Err(format!("{program} exited with {}", out.status));
+    }
+    Ok(out.stdout)
+}
+
+/// `run_limited` with extra environment, a working folder, and optionally the
+/// first `STDERR_CAPTURE_LIMIT` bytes of stderr. `stop_on_stderr` (which
+/// needs `capture_stderr`) stops the command as soon as what it has printed
+/// on stderr passes the test, for a command that would otherwise sit waiting
+/// for input it will never get.
+fn run_limited_with(
+    command: &[String],
+    timeout: Duration,
+    own_group: bool,
+    env: &[(&str, OsString)],
+    current_dir: Option<&Path>,
+    capture_stderr: bool,
+    stop_on_stderr: Option<fn(&str) -> bool>,
+) -> Result<CommandOutput, RunError> {
     use std::io::Read;
     use std::process::Stdio;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    /// How often the deadline and `stop_on_stderr` are checked.
+    const POLL: Duration = Duration::from_millis(50);
+    debug_assert!(stop_on_stderr.is_none() || capture_stderr, "stop_on_stderr needs capture_stderr");
 
-    let (program, args) = command.split_first().ok_or("empty command")?;
+    let (program, args) = command.split_first().ok_or_else(|| RunError::Failed("empty command".into()))?;
     let deadline = std::time::Instant::now() + timeout;
     let mut builder = Command::new(program);
-    builder.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    builder
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(if capture_stderr { Stdio::piped() } else { Stdio::null() });
+    for (key, value) in env {
+        builder.env(key, value);
+    }
+    if let Some(dir) = current_dir {
+        builder.current_dir(dir);
+    }
     #[cfg(unix)]
     if own_group {
         std::os::unix::process::CommandExt::process_group(&mut builder, 0);
     }
     #[cfg(not(unix))]
     let _ = own_group;
-    let mut child = builder.spawn().map_err(|e| format!("could not run {program}: {e}"))?;
+    let mut child = builder
+        .spawn()
+        .map_err(|e| RunError::Failed(format!("could not run {program}: {e}")))?;
     let tree = tree::Tree::adopt(&child, own_group);
 
     // Read stdout on its own thread so the deadline holds even while the
     // command is still printing (or keeps the pipe open and prints nothing).
-    let mut pipe = child.stdout.take().ok_or("no stdout")?;
+    let mut pipe = child.stdout.take().ok_or_else(|| RunError::Failed("no stdout".into()))?;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -802,37 +1217,90 @@ fn run_limited(command: &[String], timeout: Duration, own_group: bool) -> Result
         let _ = tx.send(read.map(|_| buf));
     });
 
+    // When requested, drain stderr on its own thread so the pipe never fills,
+    // retaining only the first `STDERR_CAPTURE_LIMIT` bytes for error messages.
+    let stop_asked = Arc::new(AtomicBool::new(false));
+    let stderr_rx = child.stderr.take().map(|mut err_pipe| {
+        let (etx, erx) = mpsc::channel();
+        let stop_asked = Arc::clone(&stop_asked);
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = err_pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                let room = STDERR_CAPTURE_LIMIT.saturating_sub(kept.len());
+                if room > 0 {
+                    kept.extend_from_slice(&chunk[..n.min(room)]);
+                    if let Some(test) = stop_on_stderr {
+                        if test(&String::from_utf8_lossy(&kept)) {
+                            stop_asked.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            let _ = etx.send(kept);
+        });
+        erx
+    });
+    let should_stop = || stop_asked.load(Ordering::Relaxed);
+    let collect_stderr = || {
+        stderr_rx
+            .as_ref()
+            .and_then(|erx| erx.recv_timeout(Duration::from_millis(200)).ok())
+            .unwrap_or_default()
+    };
+
     let stop = |child: &mut std::process::Child, why: String| {
         tree.kill(child);
         let _ = child.wait();
-        Err(why)
+        Err(RunError::Failed(why))
     };
-    let stdout = match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
-        Ok(Ok(buf)) if buf.len() as u64 > CUSTOM_MAX_OUTPUT => {
-            return stop(&mut child, format!("{program} printed more than 1 MB"));
+    let stop_timeout = |child: &mut std::process::Child| {
+        tree.kill(child);
+        let _ = child.wait();
+        Err(RunError::TimedOut {
+            message: format!("{program} took longer than {}s", timeout.as_secs()),
+            stderr: collect_stderr(),
+        })
+    };
+    let stop_interrupted = |child: &mut std::process::Child| {
+        tree.kill(child);
+        let _ = child.wait();
+        Err(RunError::Interrupted(format!("{program} was stopped early")))
+    };
+    let stdout = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left.min(POLL)) {
+            Ok(Ok(buf)) if buf.len() as u64 > CUSTOM_MAX_OUTPUT => {
+                return stop(&mut child, format!("{program} printed more than 1 MB"));
+            }
+            Ok(Ok(buf)) => break buf,
+            Ok(Err(e)) => return stop(&mut child, format!("could not read {program}: {e}")),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return stop(&mut child, format!("could not read {program}"));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if should_stop() => return stop_interrupted(&mut child),
+            Err(mpsc::RecvTimeoutError::Timeout) if std::time::Instant::now() < deadline => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => return stop_timeout(&mut child),
         }
-        Ok(Ok(buf)) => buf,
-        Ok(Err(e)) => return stop(&mut child, format!("could not read {program}: {e}")),
-        Err(_) => return stop(&mut child, format!("{program} took longer than {}s", timeout.as_secs())),
     };
 
     // Stdout is closed; give the command the rest of its time to exit.
     let status = loop {
         match child.try_wait() {
+            // A complete stdout wins over `stop_on_stderr`, so this loop
+            // only waits for the exit (still bounded by the deadline).
             Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Ok(None) => {
-                return stop(&mut child, format!("{program} took longer than {}s", timeout.as_secs()))
-            }
+            Ok(None) => return stop_timeout(&mut child),
             Err(e) => return stop(&mut child, format!("could not wait for {program}: {e}")),
         }
     };
-    if !status.success() {
-        return Err(format!("{program} exited with {status}"));
-    }
-    Ok(stdout)
+    Ok(CommandOutput { stdout, stderr: collect_stderr(), status })
 }
 
 /// A custom command together with everything it starts, so all of it can be
@@ -926,7 +1394,6 @@ mod tree {
 /// A request Copia is about to make: a URL and a few headers. Kept as plain
 /// data so the HTTP library stays a detail of `send`.
 struct Request {
-    post: bool,
     url: &'static str,
     headers: Vec<(&'static str, String)>,
 }
@@ -939,11 +1406,7 @@ fn agent() -> Http {
 
 impl Http {
     fn get(self, url: &'static str) -> Request {
-        Request { post: false, url, headers: Vec::new() }
-    }
-
-    fn post(self, url: &'static str) -> Request {
-        Request { post: true, url, headers: Vec::new() }
+        Request { url, headers: Vec::new() }
     }
 }
 
@@ -954,7 +1417,7 @@ impl Request {
     }
 }
 
-fn send(request: Request, body: Option<Value>) -> Result<Value, String> {
+fn send(request: Request) -> Result<Value, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(15)))
         .user_agent(concat!("copia/", env!("CARGO_PKG_VERSION")))
@@ -963,20 +1426,11 @@ fn send(request: Request, body: Option<Value>) -> Result<Value, String> {
         .build()
         .into();
 
-    let result = if request.post {
-        let mut builder = agent.post(request.url);
-        for (name, value) in &request.headers {
-            builder = builder.header(*name, value.as_str());
-        }
-        builder.send_json(body.unwrap_or_else(|| json!({})))
-    } else {
-        let mut builder = agent.get(request.url);
-        for (name, value) in &request.headers {
-            builder = builder.header(*name, value.as_str());
-        }
-        builder.call()
-    };
-    let mut response = result.map_err(|e| format!("network: {e}"))?;
+    let mut builder = agent.get(request.url);
+    for (name, value) in &request.headers {
+        builder = builder.header(*name, value.as_str());
+    }
+    let mut response = builder.call().map_err(|e| format!("network: {e}"))?;
 
     let code = response.status().as_u16();
     if code >= 400 {
@@ -1172,10 +1626,13 @@ mod tests {
         std::fs::write(&file, r#"{ "custom": [{ "command": ["x"] }] }"#).unwrap();
         assert!(Config::load_from(&file).problem.unwrap().contains("name"));
 
-        std::fs::write(&file, r#"{ "refresh_minutes": 10, "disabled": ["gemini"] }"#).unwrap();
+        std::fs::write(&file, r#"{ "refresh_minutes": 10, "disabled": ["antigravity"] }"#).unwrap();
         let config = Config::load_from(&file);
         assert!(config.problem.is_none());
-        assert_eq!((config.refresh_minutes, config.disabled), (Some(10), vec!["gemini".to_string()]));
+        assert_eq!(
+            (config.refresh_minutes, config.disabled),
+            (Some(10), vec!["antigravity".to_string()])
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1183,7 +1640,7 @@ mod tests {
     fn custom_providers_with_the_same_name_get_distinct_ids() {
         let custom = |name: &str| Custom { name: name.into(), command: cmd(&["/bin/echo", "[]"]) };
         let config = Config {
-            disabled: ["claude", "codex", "gemini", "opencode-go"].map(String::from).to_vec(),
+            disabled: ["claude", "codex", "antigravity", "opencode-go"].map(String::from).to_vec(),
             custom: vec![custom("Team"), custom("Team"), custom("Other")],
             ..Config::default()
         };
@@ -1329,5 +1786,327 @@ mod claude_tests {
         let (.., cli, creds) = ready.into_iter().next().unwrap();
         assert!(matches!(claude(creds, &cli), Ok(None)));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod antigravity_tests {
+    use super::*;
+
+    #[test]
+    fn antigravity_parses_groups_orders_5h_first_and_drops_epoch_zero() {
+        let reply = json!({
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.75,
+                                    "reset_time": "2026-12-01T08:07:49Z"
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.9,
+                                    "reset_time": "2026-11-24T13:07:49Z"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "window": "weekly",
+                                    "remaining_fraction": 1,
+                                    "reset_time": "1970-01-01T00:00:00Z"
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "window": "5h",
+                                    "remaining_fraction": 1,
+                                    "reset_time": "1970-01-01T00:00:00.000Z"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let quotas = antigravity_quotas(&reply).unwrap();
+        let seen: Vec<(&str, f64)> = quotas.iter().map(|q| (q.label.as_str(), q.used)).collect();
+        assert_eq!(seen.len(), 4);
+        assert_eq!(seen[0].0, "gemini 5h");
+        assert!((seen[0].1 - 0.1).abs() < 1e-9);
+        assert_eq!(seen[1].0, "gemini wk");
+        assert!((seen[1].1 - 0.25).abs() < 1e-9);
+        assert_eq!(seen[2], ("other 5h", 0.0));
+        assert_eq!(seen[3], ("other wk", 0.0));
+
+        assert_eq!(quotas[0].resets_at, Some(json!("2026-11-24T13:07:49Z")));
+        assert_eq!(quotas[1].resets_at, Some(json!("2026-12-01T08:07:49Z")));
+        assert_eq!(quotas[2].resets_at, None);
+        assert_eq!(quotas[3].resets_at, None);
+    }
+
+    #[test]
+    fn antigravity_weekly_only_starter_reply() {
+        let reply = json!({
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.4,
+                                    "reset_time": "2026-12-01T00:00:00Z"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let quotas = antigravity_quotas(&reply).unwrap();
+        assert_eq!(quotas.len(), 1);
+        assert_eq!(quotas[0].label, "gemini wk");
+        assert!((quotas[0].used - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn antigravity_error_classification_avoids_false_positives() {
+        let expired = json!({
+            "status": "ERROR",
+            "error": "authentication failed or timed out"
+        });
+        assert_eq!(antigravity_quotas(&expired).unwrap_err(), ANTIGRAVITY_SIGN_IN_ERR);
+
+        let token_limit = json!({
+            "status": "ERROR",
+            "error": "token limit exceeded"
+        });
+        let err = antigravity_quotas(&token_limit).unwrap_err();
+        assert_eq!(err, "agy: token limit exceeded");
+        assert!(!err.contains("sign-in expired"));
+
+        let wrong_cmd = json!({
+            "status": "SUCCESS",
+            "command": { "name": "other" }
+        });
+        assert!(antigravity_quotas(&wrong_cmd).is_err());
+    }
+
+    #[test]
+    fn antigravity_unknown_bucket_falls_back_cleanly() {
+        let reply = json!({
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Experimental Models",
+                            "buckets": [
+                                {
+                                    "id": "exp-daily",
+                                    "window": "day",
+                                    "remaining_fraction": 0.5
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let quotas = antigravity_quotas(&reply).unwrap();
+        assert_eq!(quotas.len(), 1);
+        assert_eq!(quotas[0].label, "other day");
+        assert_eq!(quotas[0].used, 0.5);
+        assert_eq!(quotas[0].resets_at, None);
+    }
+
+    #[test]
+    fn antigravity_timeout_and_spawn_errors_are_not_hidden() {
+        let auth_timeout = antigravity_from_run(Err(RunError::TimedOut {
+            message: "agy took longer than 15s".into(),
+            stderr: b"Authentication required. Please visit the URL to log in:\n".to_vec(),
+        }));
+        assert_eq!(auth_timeout.unwrap_err(), ANTIGRAVITY_SIGN_IN_ERR);
+
+        let hang_timeout = antigravity_from_run(Err(RunError::TimedOut {
+            message: "agy took longer than 15s".into(),
+            stderr: Vec::new(),
+        }));
+        assert_eq!(hang_timeout.unwrap_err(), "agy took longer than 15s");
+
+        let spawn_err = antigravity_from_run(Err(RunError::Failed("could not run agy: denied".into())));
+        assert_eq!(spawn_err.unwrap_err(), "could not run agy: denied");
+    }
+
+    #[test]
+    fn antigravity_local_state_markers() {
+        let home = ProbeDir::create().unwrap();
+        assert!(!antigravity_has_local_state(&home.0));
+        assert!(!antigravity_adc_enabled(&home.0));
+
+        let cache = home.0.join(".gemini/antigravity-cli/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        // The Antigravity desktop app's state file is not an agy sign-in.
+        let app = home.0.join(".gemini/antigravity");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("antigravity_state.pbtxt"), "").unwrap();
+        assert!(!antigravity_has_local_state(&home.0));
+
+        std::fs::write(cache.join("onboarding.json"), r#"{"onboardingComplete": false}"#).unwrap();
+        assert!(!antigravity_has_local_state(&home.0));
+
+        std::fs::write(cache.join("onboarding.json"), r#"{"onboardingComplete": true}"#).unwrap();
+        assert!(antigravity_has_local_state(&home.0));
+
+        let cfg = home.0.join(".gemini/config");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(cfg.join("config.json"), r#"{"userSettings":{"enableAdc":true}}"#).unwrap();
+        assert!(antigravity_adc_enabled(&home.0));
+    }
+
+    #[test]
+    fn probe_dir_creates_unique_dirs_and_cleans_up() {
+        let a = ProbeDir::create().unwrap();
+        let b = ProbeDir::create().unwrap();
+        assert_ne!(a.0, b.0);
+        let path = a.0.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+            for stub in ["open", "xdg-open"] {
+                let smode = std::fs::metadata(path.join(stub)).unwrap().permissions().mode() & 0o777;
+                assert_eq!(smode, 0o700);
+            }
+        }
+        drop(a);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_non_zero_exit_still_parses_json_error() {
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            r#"printf '{"status":"ERROR","error":"authentication failed or timed out"}'; exit 1"#
+                .to_string(),
+        ];
+        let run = run_limited_with(&cmd, Duration::from_secs(5), true, &[], None, true, None);
+        let err = antigravity_from_run(run).unwrap_err();
+        assert_eq!(err, ANTIGRAVITY_SIGN_IN_ERR);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_stops_as_soon_as_it_asks_for_sign_in() {
+        // Like agy with a lapsed sign-in: asks on stderr, then waits.
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo 'Authentication required. Please visit the URL to log in:' >&2; sleep 10".to_string(),
+        ];
+        let started = std::time::Instant::now();
+        let run = run_limited_with(
+            &cmd,
+            Duration::from_secs(10),
+            true,
+            &[],
+            None,
+            true,
+            Some(antigravity_asks_for_sign_in),
+        );
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+        assert!(matches!(run, Err(RunError::Interrupted(_))));
+        assert_eq!(antigravity_from_run(run).unwrap_err(), ANTIGRAVITY_SIGN_IN_ERR);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_stderr_does_not_stop_the_run() {
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo 'refreshing token' >&2; printf ok".to_string(),
+        ];
+        let out = run_limited_with(
+            &cmd,
+            Duration::from_secs(5),
+            true,
+            &[],
+            None,
+            true,
+            Some(antigravity_asks_for_sign_in),
+        )
+        .unwrap_or_else(|e| panic!("{}", e.into_message()));
+        assert_eq!(out.stdout, b"ok");
+        assert!(out.status.success());
+
+        assert!(antigravity_asks_for_sign_in("note\n  Authentication required. Visit:\n"));
+        assert!(!antigravity_asks_for_sign_in("retrying: authentication required by server, ok"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_agy_validates_override_expands_tilde_and_skips_non_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = ProbeDir::create().unwrap();
+        let home = dir.0.join("home");
+        let bad_bin = dir.0.join("bad_bin");
+        let good_bin = dir.0.join("good_bin");
+        for d in [&home, &bad_bin, &good_bin, &home.join("bin")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+
+        // Non-executable agy earlier on PATH is skipped for an executable one later.
+        let non_exec = bad_bin.join("agy");
+        std::fs::write(&non_exec, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let exec = good_bin.join("agy");
+        std::fs::write(&exec, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path_env = std::env::join_paths([&bad_bin, &good_bin]).unwrap();
+        let found = find_agy_in(None, Some(&path_env), Some(&home), &[]).unwrap();
+        assert_eq!(found, Some(std::fs::canonicalize(&exec).unwrap()));
+
+        // Missing or non-executable ANTIGRAVITY_CLI_PATH returns an explicit error.
+        let missing = find_agy_in(
+            Some(std::ffi::OsStr::new("~/bin/does-not-exist")),
+            Some(&path_env),
+            Some(&home),
+            &[],
+        );
+        assert_eq!(missing.unwrap_err(), "ANTIGRAVITY_CLI_PATH does not point to agy");
+
+        let non_exec_override = find_agy_in(Some(non_exec.as_os_str()), None, Some(&home), &[]);
+        assert_eq!(non_exec_override.unwrap_err(), "ANTIGRAVITY_CLI_PATH does not point to agy");
+
+        // Tilde override expands against home and canonicalizes.
+        let home_agy = home.join("bin/agy");
+        std::fs::write(&home_agy, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&home_agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let expanded =
+            find_agy_in(Some(std::ffi::OsStr::new("~/bin/agy")), None, Some(&home), &[]).unwrap();
+        assert_eq!(expanded, Some(std::fs::canonicalize(&home_agy).unwrap()));
     }
 }

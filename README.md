@@ -7,7 +7,7 @@
 *cōpia* — Latin for plenty, supply, what you have on hand.
 
 A small menubar / system-tray app that shows how much of your AI coding
-subscriptions you have left: Claude, Codex, Gemini and OpenCode Go. The tray
+subscriptions you have left: Claude, Codex, Antigravity and OpenCode Go. The tray
 icon is itself a tiny chart, one bar per tool. Click it and you get the same
 thing bigger: labelled vertical bars, one per quota window, filled to what
 remains.
@@ -88,7 +88,7 @@ command-line app is already signed in **on this computer**:
 | --- | --- |
 | Claude | [Claude Code](https://claude.com/claude-code) (`claude`) |
 | Codex / ChatGPT | [Codex CLI](https://github.com/openai/codex) (`codex`) |
-| Gemini | [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini`) |
+| Antigravity | [Antigravity CLI](https://antigravity.google/docs/cli) (`agy`) |
 | OpenCode Go | [OpenCode](https://opencode.ai) (`opencode`), or set `OPENCODE_API_KEY` |
 
 If none are signed in, the popover says so. Sign in with one, then click
@@ -144,8 +144,9 @@ says plainly what has and has not been checked.
 
 - **macOS (Apple silicon):** installed and run. The tray icon, the popover and
   its layout work.
-- **Claude and Codex:** fetched from live accounts. Claude returned its 5-hour
-  and weekly windows; Codex returned one weekly window.
+- **Claude, Codex and Antigravity:** fetched from live accounts. Claude
+  returned its 5-hour and weekly windows; Codex returned one weekly window;
+  Antigravity (`agy 1.5.16`) returned its Gemini and third-party model windows.
 - **Builds:** every change is compiled and tested on macOS, Windows and Linux,
   and the installers for all three are built by CI.
 
@@ -155,8 +156,6 @@ says plainly what has and has not been checked.
   do, please [say how it went](https://github.com/potpiemuncher/copia/issues/new/choose).
 - **macOS on Intel:** the download is a universal build, but it has only been
   run on Apple silicon.
-- **Gemini:** never tried against a real account. Its code follows the endpoint
-  listed below, so expect to fix field names.
 - **OpenCode Go:** follows OpenCode's own documentation, and the endpoint
   answers as documented without a key, but it has never been run with a real
   Go key. The app marks it "unverified".
@@ -180,7 +179,7 @@ is sent only to the vendor it belongs to.
 | --- | --- | --- |
 | Claude | macOS Keychain item `Claude Code-credentials`, else `~/.claude/.credentials.json`. Each extra config folder: item `Claude Code-credentials-<8 hex of SHA-256 of the folder>`, else `<folder>/.credentials.json` | `api.anthropic.com/api/oauth/usage` |
 | Codex / ChatGPT | `~/.codex/auth.json` (or `$CODEX_HOME`) | `chatgpt.com/backend-api/wham/usage` |
-| Gemini CLI | `~/.gemini/oauth_creds.json` | `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota` |
+| Antigravity | Runs the signed-in `agy` CLI: `$ANTIGRAVITY_CLI_PATH`, else `PATH`, else `/opt/homebrew/bin`, `/usr/local/bin` or `~/.local/bin` (Windows: `%LOCALAPPDATA%\agy\bin\agy.exe`). Runs it only if there is a sign-in: `$AGY_ADC_AUTH` or `enableAdc` in `~/.gemini/config/config.json`, else on macOS the Keychain item `gemini` / account `antigravity` (only whether it exists; its secret is not read, so this does not prompt), else (Linux, Windows, or no Keychain) `~/.gemini/antigravity-cli/cache/onboarding.json` | `agy -p /usage --output-format json` |
 | OpenCode Go | `$OPENCODE_API_KEY`, else `~/.local/share/opencode/auth.json` | `opencode.ai/inference/go/v1/usage` |
 
 Things to know:
@@ -195,14 +194,17 @@ Things to know:
 - None of these are documented public APIs. They are what the vendors' own
   tools call and can change without notice.
 - Copia never refreshes tokens. When one ages out the bar is replaced by
-  "sign-in expired — run `claude` once to renew it" (or `codex`, `gemini`).
-- Google stopped serving Gemini CLI sign-ins for individual, AI Pro and Ultra
-  accounts in June 2026, so Gemini will show an error for those accounts.
+  "sign-in expired — run `claude` once to renew it" (or `codex`, `agy`).
+  Antigravity refreshes are run with auto-update disabled and `SSH_CONNECTION`
+  set so a lapsed sign-in does not launch a browser window (with Unix
+  `open`/`xdg-open` stubs as a backstop; Windows has not been live-tested).
+  Copia stops `agy` as soon as it asks for a sign-in rather than letting it
+  wait for a code.
 - OpenCode Go is the one provider with a vendor-documented usage endpoint, and
   Copia follows that documentation, but it has not been run with a real Go
   key. OpenCode v2 keeps credentials in a SQLite database Copia does not read,
   so if `auth.json` is missing or stale, set `OPENCODE_API_KEY` to your Go key.
-- **Not built yet:** Antigravity, OpenCode Zen balance, Cursor, Copilot. Use a
+- **Not built yet:** OpenCode Zen balance, Cursor, Copilot. Use a
   custom command (below) or send a patch to `src/providers.rs`; a provider is
   one function.
 
@@ -218,7 +220,7 @@ defaults and shows the reason under **Settings** in the popover.
 ```json
 {
   "refresh_minutes": 5,
-  "disabled": ["gemini"],
+  "disabled": ["antigravity"],
   "claude_config_dirs": ["/Volumes/Work/claude-config"],
   "custom": [
     { "name": "My tool", "command": ["/path/to/script"] }
@@ -226,7 +228,7 @@ defaults and shows the reason under **Settings** in the popover.
 }
 ```
 
-Provider ids for `disabled`: `claude`, `codex`, `gemini`, `opencode-go`, and
+Provider ids for `disabled`: `claude`, `codex`, `antigravity`, `opencode-go`, and
 `claude:<name>` for an extra Claude folder (`claude:personal` for
 `~/.claude-personal`).
 

@@ -179,7 +179,7 @@ is sent only to the vendor it belongs to.
 | --- | --- | --- |
 | Claude | macOS Keychain item `Claude Code-credentials`, else `~/.claude/.credentials.json`. Each extra config folder: item `Claude Code-credentials-<8 hex of SHA-256 of the folder>`, else `<folder>/.credentials.json` | `api.anthropic.com/api/oauth/usage` |
 | Codex / ChatGPT | `~/.codex/auth.json` (or `$CODEX_HOME`) | `chatgpt.com/backend-api/wham/usage` |
-| Antigravity | Signed-in `agy` CLI (`$ANTIGRAVITY_CLI_PATH` or `PATH`) | `agy -p /usage --output-format json` |
+| Antigravity | Runs the signed-in `agy` CLI: `$ANTIGRAVITY_CLI_PATH`, else `PATH`, else `/opt/homebrew/bin`, `/usr/local/bin` or `~/.local/bin` (Windows: `%LOCALAPPDATA%\agy\bin\agy.exe`). Runs it only if there is a sign-in: `$AGY_ADC_AUTH` or `enableAdc` in `~/.gemini/config/config.json`, else on macOS the Keychain item `gemini` / account `antigravity` (only whether it exists; its secret is not read, so this does not prompt), else (Linux, Windows, or no Keychain) `~/.gemini/antigravity-cli/cache/onboarding.json` | `agy -p /usage --output-format json` |
 | OpenCode Go | `$OPENCODE_API_KEY`, else `~/.local/share/opencode/auth.json` | `opencode.ai/inference/go/v1/usage` |
 
 Things to know:
@@ -198,6 +198,8 @@ Things to know:
   Antigravity refreshes are run with auto-update disabled and `SSH_CONNECTION`
   set so a lapsed sign-in does not launch a browser window (with Unix
   `open`/`xdg-open` stubs as a backstop; Windows has not been live-tested).
+  Copia stops `agy` as soon as it asks for a sign-in rather than letting it
+  wait for a code.
 - OpenCode Go is the one provider with a vendor-documented usage endpoint, and
   Copia follows that documentation, but it has not been run with a real Go
   key. OpenCode v2 keeps credentials in a SQLite database Copia does not read,

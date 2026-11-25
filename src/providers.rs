@@ -662,9 +662,27 @@ fn antigravity() -> Fetched {
         ("SSH_CONNECTION", OsString::from("127.0.0.1 0 127.0.0.1 0")),
     ];
 
-    let result =
-        run_limited_with(&command, ANTIGRAVITY_TIMEOUT, own_group, &env, Some(&probe.0), true);
+    let result = run_limited_with(
+        &command,
+        ANTIGRAVITY_TIMEOUT,
+        own_group,
+        &env,
+        Some(&probe.0),
+        true,
+        Some(antigravity_asks_for_sign_in),
+    );
     Ok(Some(antigravity_from_run(result)?))
+}
+
+/// `agy 1.5.16` prints "Authentication required..." on stderr once its silent
+/// sign-in renewal has failed, then waits 60s for an OAuth code that a
+/// background refresh will never type. Stopping there keeps an expired
+/// sign-in from holding every refresh for the whole timeout.
+fn antigravity_asks_for_sign_in(stderr: &str) -> bool {
+    // Only a line that starts with the ask, not a log line that mentions it.
+    stderr
+        .lines()
+        .any(|line| line.trim_start().to_ascii_lowercase().starts_with("authentication required"))
 }
 
 fn antigravity_from_run(result: Result<CommandOutput, RunError>) -> Result<Vec<Quota>, String> {
@@ -683,9 +701,11 @@ fn antigravity_from_run(result: Result<CommandOutput, RunError>) -> Result<Vec<Q
             }
             Err(e) => Err(format!("unreadable reply: {e}")),
         },
+        // Stopped by `antigravity_asks_for_sign_in`: it already saw the ask, so
+        // don't depend on the stderr bytes having arrived in time.
+        Err(RunError::Interrupted(_)) => Err(ANTIGRAVITY_SIGN_IN_ERR.into()),
         Err(RunError::TimedOut { message, stderr }) => {
-            // When silent auth fails, `agy 1.5.16` prints "Authentication
-            // required..." on stderr and waits 60s for an OAuth code.
+            // Timed out after printing some other sign-in complaint?
             let stderr = String::from_utf8_lossy(&stderr);
             if is_antigravity_auth_error(&stderr) {
                 Err(ANTIGRAVITY_SIGN_IN_ERR.into())
@@ -746,15 +766,13 @@ fn antigravity_adc_enabled(home: &Path) -> bool {
 }
 
 /// On Linux and Windows (and on macOS if the Keychain is unavailable), check
-/// for the local state files `agy` or Antigravity App writes once signed in.
+/// the onboarding marker `agy` writes once signed in. It lives in agy's cache
+/// folder, which agy's docs say `/logout` clears. (The Antigravity desktop app's own state
+/// file is not a sign-in to `agy`, so it is not counted.)
 fn antigravity_has_local_state(home: &Path) -> bool {
-    if read_json(home.join(".gemini/antigravity-cli/cache/onboarding.json"))
+    read_json(home.join(".gemini/antigravity-cli/cache/onboarding.json"))
         .and_then(|v| v["onboardingComplete"].as_bool())
         == Some(true)
-    {
-        return true;
-    }
-    home.join(".gemini/antigravity/antigravity_state.pbtxt").is_file()
 }
 
 fn find_agy() -> Result<Option<PathBuf>, String> {
@@ -1104,12 +1122,16 @@ struct CommandOutput {
 enum RunError {
     Failed(String),
     TimedOut { message: String, stderr: Vec<u8> },
+    /// Stopped early because its stderr matched the `stop_on_stderr` test.
+    Interrupted(String),
 }
 
 impl RunError {
     fn into_message(self) -> String {
         match self {
-            RunError::Failed(msg) | RunError::TimedOut { message: msg, .. } => msg,
+            RunError::Failed(msg)
+            | RunError::TimedOut { message: msg, .. }
+            | RunError::Interrupted(msg) => msg,
         }
     }
 }
@@ -1123,7 +1145,7 @@ impl RunError {
 /// Copia runs in a terminal, so Ctrl-C still reaches the command and it can
 /// still prompt on the terminal (ssh, gpg…). Windows always uses a Job Object.
 fn run_limited(command: &[String], timeout: Duration, own_group: bool) -> Result<Vec<u8>, String> {
-    let out = run_limited_with(command, timeout, own_group, &[], None, false)
+    let out = run_limited_with(command, timeout, own_group, &[], None, false, None)
         .map_err(RunError::into_message)?;
     if !out.status.success() {
         let program = command.first().map(String::as_str).unwrap_or("command");
@@ -1132,6 +1154,11 @@ fn run_limited(command: &[String], timeout: Duration, own_group: bool) -> Result
     Ok(out.stdout)
 }
 
+/// `run_limited` with extra environment, a working folder, and optionally the
+/// first `STDERR_CAPTURE_LIMIT` bytes of stderr. `stop_on_stderr` (which
+/// needs `capture_stderr`) stops the command as soon as what it has printed
+/// on stderr passes the test, for a command that would otherwise sit waiting
+/// for input it will never get.
 fn run_limited_with(
     command: &[String],
     timeout: Duration,
@@ -1139,10 +1166,15 @@ fn run_limited_with(
     env: &[(&str, OsString)],
     current_dir: Option<&Path>,
     capture_stderr: bool,
+    stop_on_stderr: Option<fn(&str) -> bool>,
 ) -> Result<CommandOutput, RunError> {
     use std::io::Read;
     use std::process::Stdio;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    /// How often the deadline and `stop_on_stderr` are checked.
+    const POLL: Duration = Duration::from_millis(50);
+    debug_assert!(stop_on_stderr.is_none() || capture_stderr, "stop_on_stderr needs capture_stderr");
 
     let (program, args) = command.split_first().ok_or_else(|| RunError::Failed("empty command".into()))?;
     let deadline = std::time::Instant::now() + timeout;
@@ -1181,8 +1213,10 @@ fn run_limited_with(
 
     // When requested, drain stderr on its own thread so the pipe never fills,
     // retaining only the first `STDERR_CAPTURE_LIMIT` bytes for error messages.
+    let stop_asked = Arc::new(AtomicBool::new(false));
     let stderr_rx = child.stderr.take().map(|mut err_pipe| {
         let (etx, erx) = mpsc::channel();
+        let stop_asked = Arc::clone(&stop_asked);
         std::thread::spawn(move || {
             let mut kept = Vec::new();
             let mut chunk = [0u8; 4096];
@@ -1193,12 +1227,18 @@ fn run_limited_with(
                 let room = STDERR_CAPTURE_LIMIT.saturating_sub(kept.len());
                 if room > 0 {
                     kept.extend_from_slice(&chunk[..n.min(room)]);
+                    if let Some(test) = stop_on_stderr {
+                        if test(&String::from_utf8_lossy(&kept)) {
+                            stop_asked.store(true, Ordering::Relaxed);
+                        }
+                    }
                 }
             }
             let _ = etx.send(kept);
         });
         erx
     });
+    let should_stop = || stop_asked.load(Ordering::Relaxed);
     let collect_stderr = || {
         stderr_rx
             .as_ref()
@@ -1219,18 +1259,33 @@ fn run_limited_with(
             stderr: collect_stderr(),
         })
     };
-    let stdout = match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
-        Ok(Ok(buf)) if buf.len() as u64 > CUSTOM_MAX_OUTPUT => {
-            return stop(&mut child, format!("{program} printed more than 1 MB"));
+    let stop_interrupted = |child: &mut std::process::Child| {
+        tree.kill(child);
+        let _ = child.wait();
+        Err(RunError::Interrupted(format!("{program} was stopped early")))
+    };
+    let stdout = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left.min(POLL)) {
+            Ok(Ok(buf)) if buf.len() as u64 > CUSTOM_MAX_OUTPUT => {
+                return stop(&mut child, format!("{program} printed more than 1 MB"));
+            }
+            Ok(Ok(buf)) => break buf,
+            Ok(Err(e)) => return stop(&mut child, format!("could not read {program}: {e}")),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return stop(&mut child, format!("could not read {program}"));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if should_stop() => return stop_interrupted(&mut child),
+            Err(mpsc::RecvTimeoutError::Timeout) if std::time::Instant::now() < deadline => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => return stop_timeout(&mut child),
         }
-        Ok(Ok(buf)) => buf,
-        Ok(Err(e)) => return stop(&mut child, format!("could not read {program}: {e}")),
-        Err(_) => return stop_timeout(&mut child),
     };
 
     // Stdout is closed; give the command the rest of its time to exit.
     let status = loop {
         match child.try_wait() {
+            // A complete stdout wins over `stop_on_stderr`, so this loop
+            // only waits for the exit (still bounded by the deadline).
             Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
@@ -1899,6 +1954,12 @@ mod antigravity_tests {
 
         let cache = home.0.join(".gemini/antigravity-cli/cache");
         std::fs::create_dir_all(&cache).unwrap();
+        // The Antigravity desktop app's state file is not an agy sign-in.
+        let app = home.0.join(".gemini/antigravity");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("antigravity_state.pbtxt"), "").unwrap();
+        assert!(!antigravity_has_local_state(&home.0));
+
         std::fs::write(cache.join("onboarding.json"), r#"{"onboardingComplete": false}"#).unwrap();
         assert!(!antigravity_has_local_state(&home.0));
 
@@ -1940,9 +2001,58 @@ mod antigravity_tests {
             r#"printf '{"status":"ERROR","error":"authentication failed or timed out"}'; exit 1"#
                 .to_string(),
         ];
-        let run = run_limited_with(&cmd, Duration::from_secs(5), true, &[], None, true);
+        let run = run_limited_with(&cmd, Duration::from_secs(5), true, &[], None, true, None);
         let err = antigravity_from_run(run).unwrap_err();
         assert_eq!(err, ANTIGRAVITY_SIGN_IN_ERR);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_stops_as_soon_as_it_asks_for_sign_in() {
+        // Like agy with a lapsed sign-in: asks on stderr, then waits.
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo 'Authentication required. Please visit the URL to log in:' >&2; sleep 10".to_string(),
+        ];
+        let started = std::time::Instant::now();
+        let run = run_limited_with(
+            &cmd,
+            Duration::from_secs(10),
+            true,
+            &[],
+            None,
+            true,
+            Some(antigravity_asks_for_sign_in),
+        );
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+        assert!(matches!(run, Err(RunError::Interrupted(_))));
+        assert_eq!(antigravity_from_run(run).unwrap_err(), ANTIGRAVITY_SIGN_IN_ERR);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_stderr_does_not_stop_the_run() {
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo 'refreshing token' >&2; printf ok".to_string(),
+        ];
+        let out = run_limited_with(
+            &cmd,
+            Duration::from_secs(5),
+            true,
+            &[],
+            None,
+            true,
+            Some(antigravity_asks_for_sign_in),
+        )
+        .unwrap_or_else(|e| panic!("{}", e.into_message()));
+        assert_eq!(out.stdout, b"ok");
+        assert!(out.status.success());
+
+        assert!(antigravity_asks_for_sign_in("note\n  Authentication required. Visit:\n"));
+        assert!(!antigravity_asks_for_sign_in("retrying: authentication required by server, ok"));
     }
 
     #[cfg(unix)]
